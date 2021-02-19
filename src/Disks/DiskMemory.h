@@ -13,6 +13,28 @@ class ReadBufferFromFileBase;
 class WriteBufferFromFileBase;
 
 
+class DiskMemoryDirectoryIterator final : public IDiskDirectoryIterator
+{
+public:
+    explicit DiskMemoryDirectoryIterator(std::vector<Poco::Path> && dir_file_paths_)
+        : dir_file_paths(std::move(dir_file_paths_)), iter(dir_file_paths.begin())
+    {
+    }
+
+    void next() override { ++iter; }
+
+    bool isValid() const override { return iter != dir_file_paths.end(); }
+
+    String path() const override { return (*iter).toString(); }
+
+    String name() const override { return (*iter).getFileName(); }
+
+private:
+    std::vector<Poco::Path> dir_file_paths;
+    std::vector<Poco::Path>::iterator iter;
+};
+
+
 /** Implementation of Disk intended only for testing purposes.
   * All filesystem objects are stored in memory and lost on server restart.
   *

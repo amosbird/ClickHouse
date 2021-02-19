@@ -446,6 +446,18 @@ struct ContextSharedPart
         {
             auto lock = std::lock_guard(mutex);
 
+            // If some disks have checker threads around, need to shutdown them first.
+            if (merge_tree_disk_selector)
+                const_cast<DiskSelector &>(*merge_tree_disk_selector).shutdown();
+
+            // Also needs to shutdown tmp volume
+            if (tmp_volume)
+            {
+                const auto & disks = tmp_volume->getDisks();
+                for (const auto & disk : disks)
+                    const_cast<IDisk &>(*disk).shutdown();
+            }
+
             /// Preemptive destruction is important, because these objects may have a refcount to ContextShared (cyclic reference).
             /// TODO: Get rid of this.
 
@@ -636,7 +648,7 @@ void Context::setPath(const String & path)
         shared->dictionaries_lib_path = shared->path + "dictionaries_lib/";
 }
 
-VolumePtr Context::setTemporaryStorage(const String & path, const String & policy_name)
+VolumePtr Context::setTemporaryStorage(const Poco::Util::AbstractConfiguration & config, const String & path, const String & policy_name)
 {
     std::lock_guard lock(shared->storage_policies_mutex);
 
@@ -646,7 +658,8 @@ VolumePtr Context::setTemporaryStorage(const String & path, const String & polic
         if (!shared->tmp_path.ends_with('/'))
             shared->tmp_path += '/';
 
-        auto disk = std::make_shared<DiskLocal>("_tmp_default", shared->tmp_path, 0);
+        auto disk = std::make_shared<DiskLocal>(
+            "_tmp_default", shared->tmp_path, 0, getGlobalContext(), config.getUInt("local_disk_check_period_ms", 0));
         shared->tmp_volume = std::make_shared<SingleDiskVolume>("_tmp_default", disk, 0);
     }
     else

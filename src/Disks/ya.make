@@ -13,6 +13,7 @@ SRCS(
     DiskDecorator.cpp
     DiskFactory.cpp
     DiskLocal.cpp
+    DiskLocalCheckThread.cpp
     DiskMemory.cpp
     DiskRestartProxy.cpp
     DiskSelector.cpp

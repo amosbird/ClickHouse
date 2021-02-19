@@ -236,6 +236,9 @@ public:
     /// Get best replica having this partition on S3
     String getSharedDataReplica(const IMergeTreeDataPart & part) const;
 
+    /// Check if there are new broken disks and enqueue part recovery tasks.
+    void checkBrokenDisks();
+
 private:
     /// Get a sequential consistent view of current parts.
     ReplicatedMergeTreeQuorumAddedParts::PartitionIdToMaxBlock getMaxAddedBlocks() const;
@@ -357,6 +360,9 @@ private:
     const bool allow_renaming;
 
     const size_t replicated_fetches_pool_size;
+
+    std::mutex last_broken_disks_mutex;
+    std::set<String> last_broken_disks;
 
     template <class Func>
     void foreachCommittedParts(Func && func, bool select_sequential_consistency) const;

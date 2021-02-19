@@ -210,6 +210,9 @@ public:
     /// Return disk type - "local", "s3", etc.
     virtual DiskType::Type getType() const = 0;
 
+    /// Check if disk is broken. Broken disks will have 0 space and not be used.
+    virtual bool isBroken() const { return false; }
+
     /// Invoked when Global Context is shutdown.
     virtual void shutdown() { }
 

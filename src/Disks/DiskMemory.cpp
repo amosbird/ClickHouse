@@ -21,28 +21,6 @@ namespace ErrorCodes
 }
 
 
-class DiskMemoryDirectoryIterator final : public IDiskDirectoryIterator
-{
-public:
-    explicit DiskMemoryDirectoryIterator(std::vector<Poco::Path> && dir_file_paths_)
-        : dir_file_paths(std::move(dir_file_paths_)), iter(dir_file_paths.begin())
-    {
-    }
-
-    void next() override { ++iter; }
-
-    bool isValid() const override { return iter != dir_file_paths.end(); }
-
-    String path() const override { return (*iter).toString(); }
-
-    String name() const override { return (*iter).getFileName(); }
-
-private:
-    std::vector<Poco::Path> dir_file_paths;
-    std::vector<Poco::Path>::iterator iter;
-};
-
-
 /// Adapter with actual behaviour as ReadBufferFromString.
 class ReadIndirectBuffer final : public ReadBufferFromFileBase
 {

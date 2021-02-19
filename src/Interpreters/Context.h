@@ -312,7 +312,7 @@ public:
     void setUserFilesPath(const String & path);
     void setDictionariesLibPath(const String & path);
 
-    VolumePtr setTemporaryStorage(const String & path, const String & policy_name = "");
+    VolumePtr setTemporaryStorage(const Poco::Util::AbstractConfiguration & config, const String & path, const String & policy_name = "");
 
     using ConfigurationPtr = Poco::AutoPtr<Poco::Util::AbstractConfiguration>;
 

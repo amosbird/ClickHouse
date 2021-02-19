@@ -1,6 +1,7 @@
 #pragma once
 
 #include <common/logger_useful.h>
+#include <Disks/DiskLocalCheckThread.h>
 #include <Disks/IDisk.h>
 #include <IO/ReadBufferFromFile.h>
 #include <IO/ReadBufferFromFileBase.h>
@@ -11,24 +12,24 @@
 
 namespace DB
 {
-namespace ErrorCodes
-{
-    extern const int LOGICAL_ERROR;
-}
 
 class DiskLocalReservation;
 
 class DiskLocal : public IDisk
 {
 public:
+    friend class DiskLocalCheckThread;
     friend class DiskLocalReservation;
 
-    DiskLocal(const String & name_, const String & path_, UInt64 keep_free_space_bytes_)
-        : name(name_), disk_path(path_), keep_free_space_bytes(keep_free_space_bytes_)
-    {
-        if (disk_path.back() != '/')
-            throw Exception("Disk path must ends with '/', but '" + disk_path + "' doesn't.", ErrorCodes::LOGICAL_ERROR);
-    }
+    DiskLocal(const String & name_, const String & path_, UInt64 keep_free_space_bytes_);
+    DiskLocal(
+        const String & name_,
+        const String & path_,
+        UInt64 keep_free_space_bytes_,
+        ContextConstPtr context,
+        UInt64 local_disk_check_period_ms);
+
+    bool setupAndCheck();
 
     const String & getName() const override { return name; }
 
@@ -104,6 +105,16 @@ public:
 
     SyncGuardPtr getDirectorySyncGuard(const String & path) const override;
 
+    bool isBroken() const override { return broken; }
+
+    bool shouldRecover() const;
+
+    void shutdown() override
+    {
+        if (disk_checker)
+            disk_checker->shutdown();
+    }
+
 private:
     bool tryReserve(UInt64 bytes);
 
@@ -111,6 +122,7 @@ private:
     const String name;
     const String disk_path;
     const UInt64 keep_free_space_bytes;
+    Poco::Logger * logger;
 
     UInt64 reserved_bytes = 0;
     UInt64 reservation_count = 0;
@@ -118,6 +130,9 @@ private:
     static std::mutex reservation_mutex;
 
     Poco::Logger * log = &Poco::Logger::get("DiskLocal");
+
+    std::atomic<bool> broken{false};
+    std::unique_ptr<DiskLocalCheckThread> disk_checker;
 };
 
 }

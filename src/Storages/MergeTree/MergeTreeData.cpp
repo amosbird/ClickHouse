@@ -207,17 +207,24 @@ MergeTreeData::MergeTreeData(
     /// Creating directories, if not exist.
     for (const auto & [path, disk] : getRelativeDataPathsWithDisks())
     {
-        disk->createDirectories(path);
-        disk->createDirectories(path + MergeTreeData::DETACHED_DIR_NAME);
-        auto current_version_file_path = path + MergeTreeData::FORMAT_VERSION_FILE_NAME;
-        if (disk->exists(current_version_file_path))
+        if (!disk->isBroken())
         {
-            if (!version_file.first.empty())
+            disk->createDirectories(path);
+            disk->createDirectories(path + MergeTreeData::DETACHED_DIR_NAME);
+            auto current_version_file_path = path + MergeTreeData::FORMAT_VERSION_FILE_NAME;
+            if (disk->exists(current_version_file_path))
             {
-                LOG_ERROR(log, "Duplication of version file {} and {}", fullPath(version_file.second, version_file.first), current_version_file_path);
-                throw Exception("Multiple format_version.txt file", ErrorCodes::CORRUPTED_DATA);
+                if (!version_file.first.empty())
+                {
+                    LOG_ERROR(
+                        log,
+                        "Duplication of version file {} and {}",
+                        fullPath(version_file.second, version_file.first),
+                        current_version_file_path);
+                    throw Exception("Multiple format_version.txt file", ErrorCodes::CORRUPTED_DATA);
+                }
+                version_file = {current_version_file_path, disk};
             }
-            version_file = {current_version_file_path, disk};
         }
     }
 
@@ -772,7 +779,7 @@ void MergeTreeData::loadDataParts(bool skip_sanity_checks)
 
         for (const auto & [disk_name, disk] : getContext()->getDisksMap())
         {
-            if (defined_disk_names.count(disk_name) == 0 && disk->exists(relative_data_path))
+            if (!disk->isBroken() && defined_disk_names.count(disk_name) == 0 && disk->exists(relative_data_path))
             {
                 for (const auto it = disk->iterateDirectory(relative_data_path); it->isValid(); it->next())
                 {
@@ -789,6 +796,10 @@ void MergeTreeData::loadDataParts(bool skip_sanity_checks)
     for (auto disk_it = disks.rbegin(); disk_it != disks.rend(); ++disk_it)
     {
         auto disk_ptr = *disk_it;
+
+        if (disk_ptr->isBroken())
+            continue;
+
         for (auto it = disk_ptr->iterateDirectory(relative_data_path); it->isValid(); it->next())
         {
             /// Skip temporary directories, file 'format_version.txt' and directory 'detached'.
@@ -945,8 +956,17 @@ void MergeTreeData::loadDataParts(bool skip_sanity_checks)
             part->setState(DataPartState::Committed);
 
             std::lock_guard loading_lock(mutex);
-            if (!data_parts_indexes.insert(part).second)
-                throw Exception("Part " + part->name + " already exists", ErrorCodes::DUPLICATE_DATA_PART);
+            auto [it, inserted] = data_parts_indexes.insert(part);
+            if (!inserted)
+            {
+                if ((*it)->checksums.getTotalChecksumHex() == part->checksums.getTotalChecksumHex())
+                {
+                    LOG_ERROR(log, "Remove duplicate part {}", part->getFullPath());
+                    broken_parts_to_remove.push_back(part);
+                }
+                else
+                    throw Exception("Part " + part->name + " already exists but with different checksums", ErrorCodes::DUPLICATE_DATA_PART);
+            }
 
             addPartContributionToDataVolume(part);
         });
@@ -963,8 +983,17 @@ void MergeTreeData::loadDataParts(bool skip_sanity_checks)
         /// Assume that all parts are Committed, covered parts will be detected and marked as Outdated later
         part->setState(DataPartState::Committed);
 
-        if (!data_parts_indexes.insert(part).second)
-            throw Exception("Part " + part->name + " already exists", ErrorCodes::DUPLICATE_DATA_PART);
+        auto [it, inserted] = data_parts_indexes.insert(part);
+        if (!inserted)
+        {
+            if ((*it)->checksums.getTotalChecksumHex() == part->checksums.getTotalChecksumHex())
+            {
+                LOG_ERROR(log, "Remove duplicate part {}", part->getFullPath());
+                broken_parts_to_remove.push_back(part);
+            }
+            else
+                throw Exception("Part " + part->name + " already exists but with different checksums", ErrorCodes::DUPLICATE_DATA_PART);
+        }
 
         addPartContributionToDataVolume(part);
     }
@@ -1072,23 +1101,31 @@ void MergeTreeData::clearOldTemporaryDirectories(ssize_t custom_directories_life
     /// Delete temporary directories older than a day.
     for (const auto & [path, disk] : getRelativeDataPathsWithDisks())
     {
-        for (auto it = disk->iterateDirectory(path); it->isValid(); it->next())
+        try
         {
-            if (startsWith(it->name(), "tmp_"))
+            for (auto it = disk->iterateDirectory(path); it->isValid(); it->next())
             {
-                try
+                if (startsWith(it->name(), "tmp_"))
                 {
-                    if (disk->isDirectory(it->path()) && isOldPartDirectory(disk, it->path(), deadline))
+                    try
                     {
-                        LOG_WARNING(log, "Removing temporary directory {}", fullPath(disk, it->path()));
-                        disk->removeRecursive(it->path());
+                        if (disk->isDirectory(it->path()) && isOldPartDirectory(disk, it->path(), deadline))
+                        {
+                            LOG_WARNING(log, "Removing temporary directory {}", fullPath(disk, it->path()));
+                            disk->removeRecursive(it->path());
+                        }
+                    }
+                    catch (const Poco::FileNotFoundException &)
+                    {
+                        /// If the file is already deleted, do nothing.
                     }
                 }
-                catch (const Poco::FileNotFoundException &)
-                {
-                    /// If the file is already deleted, do nothing.
-                }
             }
+        }
+        catch (...)
+        {
+            // Don't throw when encountering file clean up failures.
+            tryLogCurrentException(__PRETTY_FUNCTION__);
         }
     }
 }
@@ -1290,6 +1327,8 @@ void MergeTreeData::clearOldWriteAheadLogs()
     for (auto disk_it = disks.rbegin(); disk_it != disks.rend(); ++disk_it)
     {
         auto disk_ptr = *disk_it;
+        if (disk_ptr->isBroken())
+            continue;
         for (auto it = disk_ptr->iterateDirectory(relative_data_path); it->isValid(); it->next())
         {
             auto min_max_block_number = MergeTreeWriteAheadLog::tryParseMinMaxBlockNumber(it->name());
@@ -1377,6 +1416,11 @@ void MergeTreeData::dropAllData()
             /// If the file is already deleted, log the error message and do nothing.
             tryLogCurrentException(__PRETTY_FUNCTION__);
         }
+        catch (const Poco::IOException &)
+        {
+            /// If the disk is broken, log the error message and do nothing.
+            tryLogCurrentException(__PRETTY_FUNCTION__);
+        }
     }
 
     setDataVolume(0, 0, 0);
@@ -1399,8 +1443,10 @@ void MergeTreeData::dropIfEmpty()
         {
             /// Non recursive, exception is thrown if there are more files.
             disk->removeFileIfExists(path + MergeTreeData::FORMAT_VERSION_FILE_NAME);
-            disk->removeDirectory(path + MergeTreeData::DETACHED_DIR_NAME);
-            disk->removeDirectory(path);
+            if (disk->exists(path + MergeTreeData::DETACHED_DIR_NAME))
+                disk->removeDirectory(path + MergeTreeData::DETACHED_DIR_NAME);
+            if (disk->exists(path))
+                disk->removeDirectory(path);
         }
     }
     catch (...)
@@ -3799,6 +3845,23 @@ MergeTreeData::PathsWithDisks MergeTreeData::getRelativeDataPathsWithDisks() con
     for (const auto & disk : disks)
         res.emplace_back(relative_data_path, disk);
     return res;
+}
+
+void MergeTreeData::reportBrokenPart(MergeTreeData::DataPartPtr & data_part) const
+{
+    if (data_part->volume && data_part->volume->getDisk()->isBroken())
+    {
+        auto disk = data_part->volume->getDisk();
+        auto parts = getDataParts();
+        LOG_WARNING(log, "Scanning parts to recover on broken disk {}.", disk->getName() + "@" + disk->getPath());
+        for (const auto & part : parts)
+        {
+            if (part->volume && part->volume->getDisk()->getName() == disk->getName())
+                broken_part_callback(part->name);
+        }
+    }
+    else
+        broken_part_callback(data_part->name);
 }
 
 MergeTreeData::MatcherFn MergeTreeData::getPartitionMatcher(const ASTPtr & partition_ast, ContextPtr local_context) const

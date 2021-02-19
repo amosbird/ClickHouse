@@ -180,6 +180,7 @@ namespace
 {
 
 void setupTmpPath(Poco::Logger * log, const std::string & path)
+try
 {
     LOG_DEBUG(log, "Setting up {} to store temporary data in it", path);
 
@@ -197,6 +198,10 @@ void setupTmpPath(Poco::Logger * log, const std::string & path)
         else
             LOG_DEBUG(log, "Skipped file in temporary path {}", it->path());
     }
+}
+catch (...)
+{
+    DB::tryLogCurrentException(log, "Caught exception while setup temporary path: " + path);
 }
 
 int waitServersToFinish(std::vector<DB::ProtocolServerAdapter> & servers, size_t seconds_to_wait)
@@ -668,7 +673,7 @@ int Server::main(const std::vector<std::string> & /*args*/)
     {
         std::string tmp_path = config().getString("tmp_path", path + "tmp/");
         std::string tmp_policy = config().getString("tmp_policy", "");
-        const VolumePtr & volume = global_context->setTemporaryStorage(tmp_path, tmp_policy);
+        const VolumePtr & volume = global_context->setTemporaryStorage(config(), tmp_path, tmp_policy);
         for (const DiskPtr & disk : volume->getDisks())
             setupTmpPath(log, disk->getPath());
     }
