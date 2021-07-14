@@ -390,7 +390,7 @@ void SelectStreamFactory::createForShard(
                     connections.emplace_back(std::move(try_result.entry));
 
                 auto remote_query_executor = std::make_shared<RemoteQueryExecutor>(
-                    std::move(connections), modified_query, header, context, throttler, scalars, external_tables, stage);
+                    pool, std::move(connections), modified_query, header, context, throttler, scalars, external_tables, stage);
 
                 return createRemoteSourcePipe(remote_query_executor, add_agg_info, add_totals, add_extremes, async_read);
             }
