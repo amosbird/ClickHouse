@@ -68,7 +68,9 @@ public:
         const VolumePtr & volume,
         const std::optional<String> & relative_path,
         Type part_type_,
-        const IMergeTreeDataPart * parent_part_);
+        const IMergeTreeDataPart * parent_part_,
+        bool adaptive = false,
+        bool is_virtual_ = false);
 
     IMergeTreeDataPart(
         MergeTreeData & storage_,
@@ -367,6 +369,12 @@ public:
         projection_parts.emplace(projection_name, std::move(projection_part));
     }
 
+    /// Add virtual projection about minmax index.
+    void addVirtualProjectionPart(const StorageMetadataPtr & metadata_snapshot);
+
+    /// Same as above but uses the data from source part. It's for clone only.
+    void addVirtualProjectionPart(const IMergeTreeDataPart & part);
+
     bool hasProjection(const String & projection_name) const
     {
         return projection_parts.find(projection_name) != projection_parts.end();
@@ -419,6 +427,8 @@ protected:
     const IMergeTreeDataPart * parent_part;
 
     std::map<String, std::shared_ptr<IMergeTreeDataPart>> projection_parts;
+
+    bool is_virtual = false;
 
     void removeIfNeeded();
 

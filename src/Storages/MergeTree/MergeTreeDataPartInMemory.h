@@ -25,6 +25,8 @@ public:
         const std::optional<String> & relative_path_ = {},
         const IMergeTreeDataPart * parent_part_ = nullptr);
 
+    MergeTreeDataPartInMemory(const MergeTreeData & storage_, const Block & block_);
+
     MergeTreeReaderPtr getReader(
         const NamesAndTypesList & columns,
         const StorageMetadataPtr & metadata_snapshot,

@@ -193,7 +193,8 @@ void Service::processQuery(const HTMLForm & params, ReadBuffer & /*body*/, Write
 
         if (client_protocol_version >= REPLICATION_PROTOCOL_VERSION_WITH_PARTS_PROJECTION)
         {
-            const auto & projections = part->getProjectionParts();
+            auto projections = part->getProjectionParts();
+            projections.erase(ProjectionDescription::VIRTUAL_PROJECTION_NAME);
             writeBinary(projections.size(), out);
             if (isInMemoryPart(part))
                 sendPartFromMemory(part, out, projections);
@@ -536,7 +537,7 @@ MergeTreeData::MutableDataPartPtr Fetcher::fetchPart(
 
         try
         {
-            return downloadPartToDiskRemoteMeta(part_name, replica_path, to_detached, tmp_prefix_, disk, in, throttler);
+            return downloadPartToDiskRemoteMeta(metadata_snapshot, part_name, replica_path, to_detached, tmp_prefix_, disk, in, throttler);
         }
         catch (const Exception & e)
         {
@@ -563,9 +564,11 @@ MergeTreeData::MutableDataPartPtr Fetcher::fetchPart(
         readBinary(projections, in);
 
     MergeTreeData::DataPart::Checksums checksums;
-    return part_type == "InMemory"
+    auto new_data_part = part_type == "InMemory"
         ? downloadPartToMemory(part_name, part_uuid, metadata_snapshot, context, disk, in, projections, throttler)
         : downloadPartToDisk(part_name, replica_path, to_detached, tmp_prefix_, sync, disk, in, projections, checksums, throttler);
+    new_data_part->addVirtualProjectionPart(metadata_snapshot);
+    return new_data_part;
 }
 
 MergeTreeData::MutableDataPartPtr Fetcher::downloadPartToMemory(
@@ -766,6 +769,7 @@ MergeTreeData::MutableDataPartPtr Fetcher::downloadPartToDisk(
 }
 
 MergeTreeData::MutableDataPartPtr Fetcher::downloadPartToDiskRemoteMeta(
+    const StorageMetadataPtr & metadata_snapshot,
     const String & part_name,
     const String & replica_path,
     bool to_detached,
@@ -846,7 +850,7 @@ MergeTreeData::MutableDataPartPtr Fetcher::downloadPartToDiskRemoteMeta(
     new_data_part->is_temp = true;
     new_data_part->modification_time = time(nullptr);
     new_data_part->loadColumnsChecksumsIndexes(true, false);
-
+    new_data_part->addVirtualProjectionPart(metadata_snapshot);
     new_data_part->storage.lockSharedData(*new_data_part);
 
     return new_data_part;

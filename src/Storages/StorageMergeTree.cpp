@@ -1335,12 +1335,12 @@ void StorageMergeTree::dropPartsImpl(DataPartsVector && parts_to_remove, bool de
 
 
 PartitionCommandsResultInfo StorageMergeTree::attachPartition(
-    const ASTPtr & partition, const StorageMetadataPtr & /* metadata_snapshot */,
+    const ASTPtr & partition, const StorageMetadataPtr & metadata_snapshot,
     bool attach_part, ContextPtr local_context)
 {
     PartitionCommandsResultInfo results;
     PartsTemporaryRename renamed_parts(*this, "detached/");
-    MutableDataPartsVector loaded_parts = tryLoadPartsToAttach(partition, attach_part, local_context, renamed_parts);
+    MutableDataPartsVector loaded_parts = tryLoadPartsToAttach(partition, metadata_snapshot, attach_part, local_context, renamed_parts);
 
     for (size_t i = 0; i < loaded_parts.size(); ++i)
     {

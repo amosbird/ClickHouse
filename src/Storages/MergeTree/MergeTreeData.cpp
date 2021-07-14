@@ -964,6 +964,7 @@ void MergeTreeData::loadDataParts(bool skip_sanity_checks)
             try
             {
                 part->loadColumnsChecksumsIndexes(require_part_metadata, true);
+                part->addVirtualProjectionPart(metadata_snapshot);
             }
             catch (const Exception & e)
             {
@@ -3292,7 +3293,10 @@ MergeTreeData::DataPartsVector MergeTreeData::getDataPartsVector(
                 for (const auto & part : range)
                 {
                     for (const auto & [p_name, projection_part] : part->getProjectionParts())
-                        res.push_back(projection_part);
+                    {
+                        if (p_name != ProjectionDescription::VIRTUAL_PROJECTION_NAME)
+                            res.push_back(projection_part);
+                    }
                 }
             }
             else
@@ -3431,8 +3435,12 @@ void MergeTreeData::dropDetached(const ASTPtr & partition, bool part, ContextPtr
     }
 }
 
-MergeTreeData::MutableDataPartsVector MergeTreeData::tryLoadPartsToAttach(const ASTPtr & partition, bool attach_part,
-        ContextPtr local_context, PartsTemporaryRename & renamed_parts)
+MergeTreeData::MutableDataPartsVector MergeTreeData::tryLoadPartsToAttach(
+    const ASTPtr & partition,
+    const StorageMetadataPtr & metadata_snapshot,
+    bool attach_part,
+    ContextPtr local_context,
+    PartsTemporaryRename & renamed_parts)
 {
     const String source_dir = "detached/";
 
@@ -3510,6 +3518,7 @@ MergeTreeData::MutableDataPartsVector MergeTreeData::tryLoadPartsToAttach(const 
         MutableDataPartPtr part = createPart(old_name, single_disk_volume, source_dir + new_name);
 
         loadPartAndFixMetadataImpl(part);
+        part->addVirtualProjectionPart(metadata_snapshot);
         loaded_parts.push_back(part);
     }
 
@@ -3961,6 +3970,10 @@ bool MergeTreeData::getQueryProcessingStageWithAggregateProjection(
     if (auto * select = query_ptr->as<ASTSelectQuery>(); select && select->final())
         return false;
 
+    // Currently projections don't support sampling yet.
+    if (settings.parallel_replicas_count > 1)
+        return false;
+
     InterpreterSelectQuery select(
         query_ptr, query_context, SelectQueryOptions{QueryProcessingStage::WithMergeableState}.ignoreProjections().ignoreAlias());
     const auto & analysis_result = select.getAnalysisResult();
@@ -4341,6 +4354,7 @@ MergeTreeData::MutableDataPartPtr MergeTreeData::cloneAndLoadDataPartOnSameDisk(
     dst_data_part->is_temp = true;
 
     dst_data_part->loadColumnsChecksumsIndexes(require_part_metadata, true);
+    dst_data_part->addVirtualProjectionPart(*src_part);
     dst_data_part->modification_time = disk->getLastModified(dst_part_path).epochTime();
     return dst_data_part;
 }

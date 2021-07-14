@@ -72,10 +72,14 @@ void MergedBlockOutputStream::writeSuffixAndFinalizePart(
     writer->finish(checksums, sync);
 
     for (const auto & [projection_name, projection_part] : new_part->getProjectionParts())
+    {
+        if (projection_name == ProjectionDescription::VIRTUAL_PROJECTION_NAME)
+            continue;
         checksums.addFile(
             projection_name + ".proj",
             projection_part->checksums.getTotalSizeOnDisk(),
             projection_part->checksums.getTotalChecksumUInt128());
+    }
 
     NamesAndTypesList part_columns;
     if (!total_columns_list)

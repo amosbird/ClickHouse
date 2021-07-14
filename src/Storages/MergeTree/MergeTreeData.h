@@ -419,8 +419,12 @@ public:
 
     void dropDetached(const ASTPtr & partition, bool part, ContextPtr context);
 
-    MutableDataPartsVector tryLoadPartsToAttach(const ASTPtr & partition, bool attach_part,
-            ContextPtr context, PartsTemporaryRename & renamed_parts);
+    MutableDataPartsVector tryLoadPartsToAttach(
+        const ASTPtr & partition,
+        const StorageMetadataPtr & metadata_snapshot,
+        bool attach_part,
+        ContextPtr context,
+        PartsTemporaryRename & renamed_parts);
 
     /// Returns Committed parts
     DataParts getDataParts() const;

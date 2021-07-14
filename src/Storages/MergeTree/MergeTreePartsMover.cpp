@@ -228,8 +228,8 @@ MergeTreeData::DataPartPtr MergeTreePartsMover::clonePart(const MergeTreeMoveEnt
     LOG_TRACE(log, "Part {} was cloned to {}", part->name, cloned_part->getFullPath());
 
     cloned_part->loadColumnsChecksumsIndexes(true, true);
+    cloned_part->addVirtualProjectionPart(*part);
     return cloned_part;
-
 }
 
 

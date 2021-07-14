@@ -29,14 +29,14 @@ std::optional<std::string> MergeTreeIndexGranularityInfo::getMarksExtensionFromF
     return {};
 }
 
-MergeTreeIndexGranularityInfo::MergeTreeIndexGranularityInfo(const MergeTreeData & storage, MergeTreeDataPartType type_)
+MergeTreeIndexGranularityInfo::MergeTreeIndexGranularityInfo(const MergeTreeData & storage, MergeTreeDataPartType type_, bool adaptive)
     : type(type_)
 {
     const auto storage_settings = storage.getSettings();
     fixed_index_granularity = storage_settings->index_granularity;
 
     /// Granularity is fixed
-    if (!storage.canUseAdaptiveGranularity())
+    if (!storage.canUseAdaptiveGranularity() && !adaptive)
     {
         if (type != MergeTreeDataPartType::WIDE)
             throw Exception("Only Wide parts can be used with non-adaptive granularity.", ErrorCodes::NOT_IMPLEMENTED);

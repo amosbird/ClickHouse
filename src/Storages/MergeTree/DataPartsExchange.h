@@ -121,6 +121,7 @@ private:
             ThrottlerPtr throttler);
 
     MergeTreeData::MutableDataPartPtr downloadPartToDiskRemoteMeta(
+            const StorageMetadataPtr & metadata_snapshot,
             const String & part_name,
             const String & replica_path,
             bool to_detached,

@@ -648,6 +648,13 @@ static StoragePtr create(const StorageFactory::Arguments & args)
         /// single default partition with name "all".
         metadata.partition_key = KeyDescription::getKeyFromAST(partition_by_key, metadata.columns, args.getContext());
 
+        auto minmax_columns = metadata.getColumnsRequiredForPartitionKey();
+        if (!minmax_columns.empty())
+        {
+            auto projection = ProjectionDescription::getVirtualProjection(args.columns, minmax_columns, args.getContext());
+            metadata.projections.add(std::move(projection));
+        }
+
         /// PRIMARY KEY without ORDER BY is allowed and considered as ORDER BY.
         if (!args.storage_def->order_by && args.storage_def->primary_key)
             args.storage_def->set(args.storage_def->order_by, args.storage_def->primary_key->clone());
@@ -729,6 +736,12 @@ static StoragePtr create(const StorageFactory::Arguments & args)
 
         metadata.partition_key = KeyDescription::getKeyFromAST(partition_by_ast, metadata.columns, args.getContext());
 
+        auto minmax_columns = metadata.getColumnsRequiredForPartitionKey();
+        if (!minmax_columns.empty())
+        {
+            auto projection = ProjectionDescription::getVirtualProjection(args.columns, minmax_columns, args.getContext());
+            metadata.projections.add(std::move(projection));
+        }
 
         ++arg_num;
 

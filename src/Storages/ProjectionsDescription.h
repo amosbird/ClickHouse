@@ -28,6 +28,8 @@ struct ProjectionDescription
         Aggregate,
     };
 
+    static constexpr const char * VIRTUAL_PROJECTION_NAME = "_minmax_projection";
+
     static const char * typeToString(Type type);
 
     /// Definition AST of projection
@@ -65,6 +67,9 @@ struct ProjectionDescription
     /// Parse projection from definition AST
     static ProjectionDescription
     getProjectionFromAST(const ASTPtr & definition_ast, const ColumnsDescription & columns, ContextPtr query_context);
+
+    static ProjectionDescription
+    getVirtualProjection(const ColumnsDescription & columns, const Names & minmax_columns, ContextPtr query_context);
 
     ProjectionDescription() = default;
 

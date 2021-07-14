@@ -365,6 +365,7 @@ MergeTreeData::MutableDataPartPtr MergeTreeDataWriter::writeTempPart(
     new_data_part->rows_count = block.rows();
     new_data_part->partition = std::move(partition);
     new_data_part->minmax_idx = std::move(minmax_idx);
+    new_data_part->addVirtualProjectionPart(metadata_snapshot);
     new_data_part->is_temp = true;
 
     SyncGuardPtr sync_guard;
@@ -390,6 +391,8 @@ MergeTreeData::MutableDataPartPtr MergeTreeDataWriter::writeTempPart(
     {
         for (const auto & projection : metadata_snapshot->getProjections())
         {
+            if (projection.name == ProjectionDescription::VIRTUAL_PROJECTION_NAME)
+                continue;
             auto in = InterpreterSelectQuery(
                           projection.query_ast,
                           context,

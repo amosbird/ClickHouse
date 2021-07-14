@@ -23,6 +23,7 @@ namespace ErrorCodes
     extern const int NO_SUCH_PROJECTION_IN_TABLE;
     extern const int ILLEGAL_PROJECTION;
     extern const int NOT_IMPLEMENTED;
+    extern const int BAD_ARGUMENTS;
 };
 
 const char * ProjectionDescription::typeToString(Type type)
@@ -99,7 +100,9 @@ ProjectionDescription::getProjectionFromAST(const ASTPtr & definition_ast, const
         throw Exception("Cannot create projection from non ASTProjectionDeclaration AST", ErrorCodes::INCORRECT_QUERY);
 
     if (projection_definition->name.empty())
-        throw Exception("Projection must have name in definition.", ErrorCodes::INCORRECT_QUERY);
+        throw Exception("Projection must have name in definition", ErrorCodes::INCORRECT_QUERY);
+    else if (projection_definition->name == VIRTUAL_PROJECTION_NAME)
+        throw Exception(ErrorCodes::INCORRECT_QUERY, "'{}' is a built-in projection name and cannot be specified", VIRTUAL_PROJECTION_NAME);
 
     if (!projection_definition->query)
         throw Exception("QUERY is required for projection", ErrorCodes::INCORRECT_QUERY);
@@ -187,6 +190,54 @@ ProjectionDescription::getProjectionFromAST(const ASTPtr & definition_ast, const
     return result;
 }
 
+ProjectionDescription
+ProjectionDescription::getVirtualProjection(const ColumnsDescription & columns, const Names & minmax_columns, ContextPtr query_context)
+{
+    auto select_query = std::make_shared<ASTProjectionSelectQuery>();
+    ASTPtr select_expression_list = std::make_shared<ASTExpressionList>();
+    for (const auto & column : minmax_columns)
+    {
+        auto name = backQuoteIfNeed(column);
+        select_expression_list->children.push_back(makeASTFunction("min", std::make_shared<ASTIdentifier>(name)));
+        select_expression_list->children.push_back(makeASTFunction("max", std::make_shared<ASTIdentifier>(name)));
+    }
+    select_expression_list->children.push_back(makeASTFunction("count"));
+    select_query->setExpression(ASTProjectionSelectQuery::Expression::SELECT, std::move(select_expression_list));
+
+    ProjectionDescription result;
+    result.definition_ast = select_query;
+    result.name = VIRTUAL_PROJECTION_NAME;
+    result.query_ast = select_query->cloneToASTSelect();
+
+    auto external_storage_holder = std::make_shared<TemporaryTableHolder>(query_context, columns, ConstraintsDescription{});
+    StoragePtr storage = external_storage_holder->getTable();
+    InterpreterSelectQuery select(
+        result.query_ast, query_context, storage, {}, SelectQueryOptions{QueryProcessingStage::WithMergeableState}.modify().ignoreAlias());
+    result.required_columns = select.getRequiredColumns();
+    result.sample_block = select.getSampleBlock();
+
+    for (size_t i = 0; i < result.sample_block.columns(); ++i)
+    {
+        const auto & column_with_type_name = result.sample_block.getByPosition(i);
+
+        if (column_with_type_name.column && isColumnConst(*column_with_type_name.column))
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Projections cannot contain constant columns: {}", column_with_type_name.name);
+
+        result.column_names.emplace_back(column_with_type_name.name);
+        result.data_types.emplace_back(column_with_type_name.type);
+    }
+    result.type = ProjectionDescription::Type::Aggregate;
+    StorageInMemoryMetadata metadata;
+    metadata.setColumns(ColumnsDescription(result.sample_block.getNamesAndTypesList()));
+    metadata.partition_key = KeyDescription::getSortingKeyFromAST({}, metadata.columns, query_context, {});
+    metadata.sorting_key = KeyDescription::getSortingKeyFromAST({}, metadata.columns, query_context, {});
+    metadata.primary_key = KeyDescription::getKeyFromAST({}, metadata.columns, query_context);
+    metadata.primary_key.definition_ast = nullptr;
+    result.metadata = std::make_shared<StorageInMemoryMetadata>(metadata);
+    return result;
+}
+
+
 void ProjectionDescription::recalculateWithNewColumns(const ColumnsDescription & new_columns, ContextPtr query_context)
 {
     *this = getProjectionFromAST(definition_ast, new_columns, query_context);
@@ -199,7 +250,11 @@ String ProjectionsDescription::toString() const
 
     ASTExpressionList list;
     for (const auto & projection : projections)
+    {
+        if (projection.name == ProjectionDescription::VIRTUAL_PROJECTION_NAME)
+            continue;
         list.children.push_back(projection.definition_ast);
+    }
 
     return serializeAST(list, true);
 }
@@ -267,6 +322,9 @@ void ProjectionsDescription::add(ProjectionDescription && projection, const Stri
 
 void ProjectionsDescription::remove(const String & projection_name, bool if_exists)
 {
+    if (projection_name == ProjectionDescription::VIRTUAL_PROJECTION_NAME)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Cannot drop built-in projection {}", ProjectionDescription::VIRTUAL_PROJECTION_NAME);
+
     auto it = map.find(projection_name);
     if (it == map.end())
     {

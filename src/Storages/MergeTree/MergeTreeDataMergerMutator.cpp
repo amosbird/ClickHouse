@@ -1115,6 +1115,8 @@ MergeTreeData::MutableDataPartPtr MergeTreeDataMergerMutator::mergePartsToTempor
     for (const auto & part : parts)
         new_data_part->minmax_idx.merge(part->minmax_idx);
 
+    new_data_part->addVirtualProjectionPart(metadata_snapshot);
+
     /// Print overall profiling info. NOTE: it may duplicates previous messages
     {
         double elapsed_seconds = merge_entry->watch.elapsedSeconds();
@@ -1131,6 +1133,9 @@ MergeTreeData::MutableDataPartPtr MergeTreeDataMergerMutator::mergePartsToTempor
 
     for (const auto & projection : metadata_snapshot->getProjections())
     {
+        if (projection.name == ProjectionDescription::VIRTUAL_PROJECTION_NAME)
+            continue;
+
         MergeTreeData::DataPartsVector projection_parts;
         for (const auto & part : parts)
         {
@@ -1443,7 +1448,7 @@ MergeTreeData::MutableDataPartPtr MergeTreeDataMergerMutator::mutatePartToTempor
 
         finalizeMutatedPart(source_part, new_data_part, need_remove_expired_values, compression_codec);
     }
-
+    new_data_part->addVirtualProjectionPart(metadata_snapshot);
     return new_data_part;
 }
 
@@ -1869,7 +1874,7 @@ MergeTreeProjections MergeTreeDataMergerMutator::getProjectionsForNewDataPart(
 
     MergeTreeProjections new_projections;
     for (const auto & projection : all_projections)
-        if (!removed_projections.count(projection.name))
+        if (!removed_projections.count(projection.name) && projection.name != ProjectionDescription::VIRTUAL_PROJECTION_NAME)
             new_projections.push_back(MergeTreeProjectionFactory::instance().get(projection));
 
     return new_projections;

@@ -26,7 +26,7 @@ public:
     /// Approximate bytes size of one granule
     size_t index_granularity_bytes = 0;
 
-    MergeTreeIndexGranularityInfo(const MergeTreeData & storage, MergeTreeDataPartType type_);
+    MergeTreeIndexGranularityInfo(const MergeTreeData & storage, MergeTreeDataPartType type_, bool adaptive = false);
 
     void changeGranularityIfRequired(const DiskPtr & disk, const String & path_to_part);
 

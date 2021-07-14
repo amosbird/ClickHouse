@@ -14,6 +14,7 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int DIRECTORY_ALREADY_EXISTS;
+    extern const int LOGICAL_ERROR;
 }
 
 
@@ -40,6 +41,25 @@ MergeTreeDataPartInMemory::MergeTreeDataPartInMemory(
     default_codec = CompressionCodecFactory::instance().get("NONE", {});
 }
 
+MergeTreeDataPartInMemory::MergeTreeDataPartInMemory(const MergeTreeData & storage_, const Block & block_)
+    : IMergeTreeDataPart(
+        storage_,
+        ProjectionDescription::VIRTUAL_PROJECTION_NAME,
+        {},
+        {},
+        {},
+        Type::IN_MEMORY,
+        {},
+        true /* adaptive */,
+        true /* is_virtual */)
+    , block(block_)
+{
+    setColumns(block.getNamesAndTypesList());
+    index_granularity.appendMark(block.rows());
+    if (storage.getSettings()->write_final_mark)
+        index_granularity.appendMark(0);
+}
+
 IMergeTreeDataPart::MergeTreeReaderPtr MergeTreeDataPartInMemory::getReader(
     const NamesAndTypesList & columns_to_read,
     const StorageMetadataPtr & metadata_snapshot,
@@ -63,6 +83,9 @@ IMergeTreeDataPart::MergeTreeWriterPtr MergeTreeDataPartInMemory::getWriter(
     const MergeTreeWriterSettings & writer_settings,
     const MergeTreeIndexGranularity & /* computed_index_granularity */) const
 {
+    if (is_virtual)
+        throw Exception("Virtual part cannot have writer. It's a bug", ErrorCodes::LOGICAL_ERROR);
+
     auto ptr = std::static_pointer_cast<const MergeTreeDataPartInMemory>(shared_from_this());
     return std::make_unique<MergeTreeDataPartWriterInMemory>(
         ptr, columns_list, metadata_snapshot, writer_settings);
@@ -70,6 +93,9 @@ IMergeTreeDataPart::MergeTreeWriterPtr MergeTreeDataPartInMemory::getWriter(
 
 void MergeTreeDataPartInMemory::flushToDisk(const String & base_path, const String & new_relative_path, const StorageMetadataPtr & metadata_snapshot) const
 {
+    if (is_virtual)
+        throw Exception("Virtual part cannot be flushed to disk. It's a bug", ErrorCodes::LOGICAL_ERROR);
+
     const auto & disk = volume->getDisk();
     String destination_path = base_path + new_relative_path;
 
@@ -99,12 +125,18 @@ void MergeTreeDataPartInMemory::flushToDisk(const String & base_path, const Stri
 
 void MergeTreeDataPartInMemory::makeCloneInDetached(const String & prefix, const StorageMetadataPtr & metadata_snapshot) const
 {
+    if (is_virtual)
+        throw Exception("Virtual part cannot be cloned. It's a bug", ErrorCodes::LOGICAL_ERROR);
+
     String detached_path = getRelativePathForDetachedPart(prefix);
     flushToDisk(storage.getRelativeDataPath(), detached_path, metadata_snapshot);
 }
 
 void MergeTreeDataPartInMemory::renameTo(const String & new_relative_path, bool /* remove_new_dir_if_exists */) const
 {
+    if (is_virtual)
+        throw Exception("Virtual part cannot be renamed. It's a bug", ErrorCodes::LOGICAL_ERROR);
+
     relative_path = new_relative_path;
 }
 

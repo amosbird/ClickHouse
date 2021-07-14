@@ -1470,6 +1470,8 @@ MergeTreeData::MutableDataPartPtr StorageReplicatedMergeTree::attachPartHelperFo
             try
             {
                 part->loadColumnsChecksumsIndexes(true, true);
+                // Use current storage metadata.
+                part->addVirtualProjectionPart(getInMemoryMetadataPtr());
             }
             catch (const Exception&)
             {
@@ -5251,7 +5253,7 @@ PartitionCommandsResultInfo StorageReplicatedMergeTree::attachPartition(
 
     PartitionCommandsResultInfo results;
     PartsTemporaryRename renamed_parts(*this, "detached/");
-    MutableDataPartsVector loaded_parts = tryLoadPartsToAttach(partition, attach_part, query_context, renamed_parts);
+    MutableDataPartsVector loaded_parts = tryLoadPartsToAttach(partition, metadata_snapshot, attach_part, query_context, renamed_parts);
 
     /// TODO Allow to use quorum here.
     ReplicatedMergeTreeBlockOutputStream output(*this, metadata_snapshot, 0, 0, 0, false, false, query_context,

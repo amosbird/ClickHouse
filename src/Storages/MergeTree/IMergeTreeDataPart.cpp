@@ -7,6 +7,7 @@
 #include <IO/ReadHelpers.h>
 #include <IO/WriteHelpers.h>
 #include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/MergeTree/MergeTreeDataPartInMemory.h>
 #include <Storages/MergeTree/localBackup.h>
 #include <Storages/MergeTree/checkDataPart.h>
 #include <Storages/StorageReplicatedMergeTree.h>
@@ -19,6 +20,7 @@
 #include <Compression/getCompressionCodecForFile.h>
 #include <Parsers/queryToString.h>
 #include <DataTypes/NestedUtils.h>
+#include <AggregateFunctions/AggregateFunctionCount.h>
 
 
 namespace CurrentMetrics
@@ -283,26 +285,35 @@ IMergeTreeDataPart::IMergeTreeDataPart(
     const VolumePtr & volume_,
     const std::optional<String> & relative_path_,
     Type part_type_,
-    const IMergeTreeDataPart * parent_part_)
+    const IMergeTreeDataPart * parent_part_,
+    bool adaptive,
+    bool is_virtual_)
     : storage(storage_)
     , name(name_)
     , info(info_)
     , volume(parent_part_ ? parent_part_->volume : volume_)
     , relative_path(relative_path_.value_or(name_))
-    , index_granularity_info(storage_, part_type_)
+    , index_granularity_info(storage_, part_type_, adaptive)
     , part_type(part_type_)
     , parent_part(parent_part_)
+    , is_virtual(is_virtual_)
 {
     if (parent_part)
         state = State::Committed;
-    incrementStateMetric(state);
-    incrementTypeMetric(part_type);
+    if (!is_virtual)
+    {
+        incrementStateMetric(state);
+        incrementTypeMetric(part_type);
+    }
 }
 
 IMergeTreeDataPart::~IMergeTreeDataPart()
 {
-    decrementStateMetric(state);
-    decrementTypeMetric(part_type);
+    if (!is_virtual)
+    {
+        decrementStateMetric(state);
+        decrementTypeMetric(part_type);
+    }
 }
 
 
@@ -1238,6 +1249,8 @@ void IMergeTreeDataPart::remove() const
 
 void IMergeTreeDataPart::projectionRemove(const String & parent_to, bool keep_shared_data) const
 {
+    if (name == ProjectionDescription::VIRTUAL_PROJECTION_NAME)
+        return;
     String to = parent_to + "/" + relative_path;
     auto disk = volume->getDisk();
     if (checksums.empty())
@@ -1311,6 +1324,91 @@ String IMergeTreeDataPart::getRelativePathForDetachedPart(const String & prefix)
     /// Do not allow underscores in the prefix because they are used as separators.
     assert(prefix.find_first_of('_') == String::npos);
     return "detached/" + getRelativePathForPrefix(prefix);
+}
+
+void IMergeTreeDataPart::addVirtualProjectionPart(const StorageMetadataPtr & metadata_snapshot)
+{
+    const auto & projections = metadata_snapshot->getProjections();
+    if (!projections.has(ProjectionDescription::VIRTUAL_PROJECTION_NAME))
+        return;
+
+    auto block = projections.get(ProjectionDescription::VIRTUAL_PROJECTION_NAME).sample_block;
+    if (!minmax_idx.initialized)
+    {
+        if (isEmpty())
+        {
+            auto part_virtual = std::make_shared<MergeTreeDataPartInMemory>(storage, block);
+            part_virtual->parent_part = this;
+            projection_parts.emplace(ProjectionDescription::VIRTUAL_PROJECTION_NAME, std::move(part_virtual));
+            return;
+        }
+        else
+            throw Exception(
+                "Cannot add virtual projection part when minmax_idx is not initialized yet. It's a bug", ErrorCodes::LOGICAL_ERROR);
+    }
+
+    auto minmax_count_columns = block.mutateColumns();
+    size_t minmax_idx_size = minmax_idx.hyperrectangle.size();
+    if (2 * minmax_idx_size != minmax_count_columns.size() - 1)
+        throw Exception(
+            ErrorCodes::LOGICAL_ERROR,
+            "Virtual projection part should have twice plus one the number of ranges in minmax_idx. 2 * minmax_idx_size = {}, "
+            "minmax_count_columns.size() - 1 = {}. It's a bug",
+            2 * minmax_idx_size,
+            minmax_count_columns.size() - 1);
+
+    auto insert = [&](ColumnAggregateFunction & column, const Field & value)
+    {
+        auto func = column.getAggregateFunction();
+        Arena & arena = column.createOrGetArena();
+        size_t size_of_state = func->sizeOfData();
+        size_t align_of_state = func->alignOfData();
+        auto * place = arena.alignedAlloc(size_of_state, align_of_state);
+        func->create(place);
+        auto value_column = func->getReturnType()->createColumnConst(1, value)->convertToFullColumnIfConst();
+        const auto * value_column_ptr = value_column.get();
+        func->add(place, &value_column_ptr, 0, &arena);
+        column.insertFrom(place);
+    };
+
+    for (size_t i = 0; i < minmax_idx_size; ++i)
+    {
+        size_t min_pos = i * 2;
+        size_t max_pos = i * 2 + 1;
+        auto & min_column = assert_cast<ColumnAggregateFunction &>(*minmax_count_columns[min_pos]);
+        auto & max_column = assert_cast<ColumnAggregateFunction &>(*minmax_count_columns[max_pos]);
+        auto & range = minmax_idx.hyperrectangle[i];
+        insert(min_column, range.left);
+        insert(max_column, range.right);
+    }
+
+    {
+        auto & column = assert_cast<ColumnAggregateFunction &>(*minmax_count_columns.back());
+        auto func = column.getAggregateFunction();
+        Arena & arena = column.createOrGetArena();
+        size_t size_of_state = func->sizeOfData();
+        size_t align_of_state = func->alignOfData();
+        auto * place = arena.alignedAlloc(size_of_state, align_of_state);
+        func->create(place);
+        const AggregateFunctionCount & agg_count = assert_cast<const AggregateFunctionCount &>(*func);
+        agg_count.set(place, rows_count);
+        column.insertFrom(place);
+    }
+    block.setColumns(std::move(minmax_count_columns));
+    auto part_virtual = std::make_shared<MergeTreeDataPartInMemory>(storage, block);
+    part_virtual->parent_part = this;
+    projection_parts.emplace(ProjectionDescription::VIRTUAL_PROJECTION_NAME, std::move(part_virtual));
+}
+
+void IMergeTreeDataPart::addVirtualProjectionPart(const IMergeTreeDataPart & part)
+{
+    auto it = part.projection_parts.find(ProjectionDescription::VIRTUAL_PROJECTION_NAME);
+    if (it != part.projection_parts.end())
+    {
+        auto part_virtual = std::make_shared<MergeTreeDataPartInMemory>(storage, asInMemoryPart(it->second)->block);
+        part_virtual->parent_part = this;
+        projection_parts.emplace(ProjectionDescription::VIRTUAL_PROJECTION_NAME, std::move(part_virtual));
+    }
 }
 
 void IMergeTreeDataPart::renameToDetached(const String & prefix) const

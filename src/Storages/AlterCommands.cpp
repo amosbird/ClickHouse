@@ -937,13 +937,25 @@ void AlterCommands::apply(StorageInMemoryMetadata & metadata, ContextPtr context
     {
         try
         {
-            new_projections.add(ProjectionDescription::getProjectionFromAST(projection.definition_ast, metadata_copy.columns, context));
+            if (projection.name != ProjectionDescription::VIRTUAL_PROJECTION_NAME)
+                new_projections.add(ProjectionDescription::getProjectionFromAST(projection.definition_ast, metadata_copy.columns, context));
         }
         catch (Exception & exception)
         {
             exception.addMessage("Cannot apply mutation because it breaks projection " + projection.name);
             throw;
         }
+    }
+    try
+    {
+        auto minmax_columns = metadata_copy.getColumnsRequiredForPartitionKey();
+        if (!minmax_columns.empty())
+            new_projections.add(ProjectionDescription::getVirtualProjection(metadata_copy.columns, minmax_columns, context));
+    }
+    catch (Exception & exception)
+    {
+        exception.addMessage("Cannot apply mutation because it breaks built-in projection {}", ProjectionDescription::VIRTUAL_PROJECTION_NAME);
+        throw;
     }
     metadata_copy.projections = std::move(new_projections);
 
