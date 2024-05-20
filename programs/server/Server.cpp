@@ -145,7 +145,6 @@ namespace CurrentMetrics
     extern const Metric MergesMutationsMemoryTracking;
     extern const Metric MaxDDLEntryID;
     extern const Metric MaxPushedDDLEntryID;
-    extern const Metric JemallocProfileActive;
 }
 
 namespace ProfileEvents
@@ -184,10 +183,6 @@ int mainEntryClickHouseServer(int argc, char ** argv)
             "(that can be disabled with CLICKHOUSE_WATCHDOG_ENABLE=0)");
     }
 
-    if (jemallocOptionEnabled("prof.active"))
-    {
-        CurrentMetrics::set(CurrentMetrics::JemallocProfileActive, true);
-    }
     /// Do not fork separate process from watchdog if we attached to terminal.
     /// Otherwise it breaks gdb usage.
     /// Can be overridden by environment variable (cannot use server config at this moment).
