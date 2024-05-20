@@ -56,6 +56,7 @@ void setJemallocProfileActive(bool value)
         LOG_TRACE(&Poco::Logger::get("SystemJemalloc"), "Profiling is already {}", active ? "enabled" : "disabled");
         return;
     }
+
     mallctl("prof.active", nullptr, nullptr, &value, sizeof(bool));
     LOG_TRACE(&Poco::Logger::get("SystemJemalloc"), "Profiling is {}", value ? "enabled" : "disabled");
 }
