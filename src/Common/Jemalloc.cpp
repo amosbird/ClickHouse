@@ -4,6 +4,7 @@
 
 #include <Common/Stopwatch.h>
 #include <Common/logger_useful.h>
+#include <Common/CurrentMetrics.h>
 #include <jemalloc/jemalloc.h>
 
 #define STRINGIFY_HELPER(x) #x
@@ -13,6 +14,11 @@ namespace ProfileEvents
 {
     extern const Event MemoryAllocatorPurge;
     extern const Event MemoryAllocatorPurgeTimeMicroseconds;
+}
+
+namespace CurrentMetrics
+{
+    extern const Metric JemallocProfileActive;
 }
 
 namespace DB
@@ -56,7 +62,10 @@ void setJemallocProfileActive(bool value)
         LOG_TRACE(&Poco::Logger::get("SystemJemalloc"), "Profiling is already {}", active ? "enabled" : "disabled");
         return;
     }
-
+    if (value)
+        CurrentMetrics::set(CurrentMetrics::JemallocProfileActive, true);
+    else
+        CurrentMetrics::set(CurrentMetrics::JemallocProfileActive, false);
     mallctl("prof.active", nullptr, nullptr, &value, sizeof(bool));
     LOG_TRACE(&Poco::Logger::get("SystemJemalloc"), "Profiling is {}", value ? "enabled" : "disabled");
 }
