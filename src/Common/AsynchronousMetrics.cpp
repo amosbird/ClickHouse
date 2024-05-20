@@ -404,12 +404,12 @@ static Value saveAllArenasMetric(AsynchronousMetricValues & values,
 }
 
 template<typename Value>
-static Value saveProfMetric(AsynchronousMetricValues & values,
+static Value saveJemallocProf(AsynchronousMetricValues & values,
     const std::string & metric_name)
 {
     return saveJemallocMetricImpl<Value>(values,
-        fmt::format("{}", metric_name),
-        fmt::format("jemalloc.{}", metric_name));
+        fmt::format("prof.{}", metric_name),
+        fmt::format("jemalloc.prof.{}", metric_name));
 }
 
 #endif
@@ -601,7 +601,7 @@ void AsynchronousMetrics::update(TimePoint update_time)
     saveJemallocMetric<size_t>(new_values, "background_thread.num_threads");
     saveJemallocMetric<uint64_t>(new_values, "background_thread.num_runs");
     saveJemallocMetric<uint64_t>(new_values, "background_thread.run_intervals");
-    saveProfMetric<size_t>(new_values, "prof.active");
+    saveJemallocProf<size_t>(new_values, "active");
     saveAllArenasMetric<size_t>(new_values, "pactive");
     [[maybe_unused]] size_t je_malloc_pdirty = saveAllArenasMetric<size_t>(new_values, "pdirty");
     [[maybe_unused]] size_t je_malloc_pmuzzy = saveAllArenasMetric<size_t>(new_values, "pmuzzy");
