@@ -377,7 +377,60 @@ void StackTrace::tryCapture()
 #if defined(OS_DARWIN)
     size = backtrace(frame_pointers.data(), capacity);
 #else
+    /// The `unw_backtrace` function manipulates the `DwarfFDECache` which
+    /// acquires a read-write mutex (RWMutex). This is not async-signal-safe and
+    /// can lead to serious issues. In particular, a signal handler might try to
+    /// acquire the mutex while current thread is in the process of acquiring
+    /// it, potentially leading to corruption of the mutex state and making
+    /// debugging extremely difficult. A deadlock occurring during stack
+    /// unwinding typically results in a "stop-the-world" situation.
+    ///
+    /// To prevent recursive calls during unwinding, we must disable the
+    /// following signals:
+    ///
+    /// - SIGUSR1: Used by the CPU Profiler
+    /// - SIGUSR2: Used by the Real Profiler
+    /// - SIGTRIM: Used by system.stack_trace
+    size = 0;
+    sigset_t new_mask, old_mask;
+
+    /// The following system calls do not perform logging on errors because they
+    /// may be executed within a signal handler.
+
+    /// From https://man7.org/linux/man-pages/man3/sigemptyset.3p.html
+    ///
+    /// No errors are defined for sigemptyset.
+    if (sigemptyset(&new_mask))
+        return;
+
+    /// From https://man7.org/linux/man-pages/man3/sigaddset.3p.html
+    /// The sigaddset() function may fail if:
+    /// EINVAL The value of the signo argument is an invalid or
+    ///        unsupported signal number.
+    ///
+    /// Which should not happen.
+    if (sigaddset(&new_mask, SIGUSR1))
+        return;
+
+    if (sigaddset(&new_mask, SIGUSR2))
+        return;
+
+    if (sigaddset(&new_mask, SIGRTMIN))
+        return;
+
+    /// From https://man7.org/linux/man-pages/man2/sigprocmask.2.html
+    /// The pthread_sigmask() function may fail if:
+    /// EFAULT The set or oldset argument points outside the process's allocated address space.
+    /// EINVAL Either the value specified in how was invalid or the kernel does not support the size
+    ///        passed in sigsetsize.
+    ///
+    /// So in theory no error should occur if pthread_sigmask is called properly.
+    if (pthread_sigmask(SIG_BLOCK, &new_mask, &old_mask) != 0)
+        return;
+
     size = unw_backtrace(frame_pointers.data(), capacity);
+
+    pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
 #endif
     __msan_unpoison(frame_pointers.data(), size * sizeof(frame_pointers[0]));
 }
