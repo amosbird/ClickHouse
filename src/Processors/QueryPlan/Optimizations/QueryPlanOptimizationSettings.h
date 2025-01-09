@@ -42,6 +42,7 @@ struct QueryPlanOptimizationSettings
     bool aggregate_partitions_independently;
     bool remove_redundant_distinct;
     bool try_use_vector_search;
+    bool push_down_order_by_limit;
 
     /// --- Second-pass optimizations
     bool optimize_prewhere;

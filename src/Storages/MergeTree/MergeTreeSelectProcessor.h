@@ -78,6 +78,8 @@ public:
 
     void addPartLevelToChunk(bool add_part_level_) { add_part_level = add_part_level_; }
 
+    PrewhereInfoPtr getPrewhereInfo() const { return prewhere_info; }
+
 private:
     /// Sets up range readers corresponding to data readers
     void initializeRangeReaders();
