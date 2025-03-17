@@ -15,18 +15,23 @@ private:
     /// The type of array elements.
     DataTypePtr nested;
 
+    /// If n > 0, it indicates FixedArray
+    size_t n = 0;
+
 public:
     using FieldType = Array;
     using ColumnType = ColumnArray;
     static constexpr bool is_parametric = true;
 
-    explicit DataTypeArray(const DataTypePtr & nested_);
+    explicit DataTypeArray(const DataTypePtr & nested_, size_t n_ = 0);
 
     TypeIndex getTypeId() const override { return TypeIndex::Array; }
 
     std::string doGetName() const override
     {
-        return "Array(" + nested->getName() + ")";
+        if (n > 0)
+            return fmt::format("Array({}, {})", nested->getName(), n);
+        return fmt::format("Array({})", nested->getName());
     }
 
     std::string doGetPrettyName(size_t indent) const override;

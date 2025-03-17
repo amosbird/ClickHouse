@@ -21,10 +21,10 @@ private:
     friend class COWHelper<IColumnHelper<ColumnArray>, ColumnArray>;
 
     /** Create an array column with specified values and offsets. */
-    ColumnArray(MutableColumnPtr && nested_column, MutableColumnPtr && offsets_column);
+    ColumnArray(MutableColumnPtr && nested_column, MutableColumnPtr && offsets_column, size_t n_ = 0);
 
     /** Create an empty column of arrays with the type of values as in the column `nested_column` */
-    explicit ColumnArray(MutableColumnPtr && nested_column);
+    explicit ColumnArray(MutableColumnPtr && nested_column, size_t n_ = 0);
 
     ColumnArray(const ColumnArray &) = default;
 
@@ -50,19 +50,31 @@ public:
       */
     using Base = COWHelper<IColumnHelper<ColumnArray>, ColumnArray>;
 
-    static Ptr create(const ColumnPtr & nested_column, const ColumnPtr & offsets_column)
+    static Ptr create(const ColumnPtr & nested_column, const ColumnPtr & offsets_column, size_t n_ = 0)
     {
-        return ColumnArray::create(nested_column->assumeMutable(), offsets_column->assumeMutable());
+        return ColumnArray::create(nested_column->assumeMutable(), offsets_column->assumeMutable(), n_);
     }
 
-    static Ptr create(const ColumnPtr & nested_column)
+    static Ptr create(const ColumnPtr & nested_column, size_t n_ = 0)
     {
-        return ColumnArray::create(nested_column->assumeMutable());
+        return ColumnArray::create(nested_column->assumeMutable(), n_);
     }
 
-    template <typename ... Args>
-    requires (IsMutableColumns<Args ...>::value)
-    static MutablePtr create(Args &&... args) { return Base::create(std::forward<Args>(args)...); }
+    /// Mutable versions returning MutablePtr - add template to make these preferred
+    template <typename T1, typename T2>
+    requires (IsMutableColumns<T1, T2>::value)
+    static MutablePtr create(T1 && nested_column, T2 && offsets_column, size_t n_ = 0)
+    {
+        return Base::create(std::forward<T1>(nested_column), std::forward<T2>(offsets_column), n_);
+    }
+
+    /// Mutable versions returning MutablePtr - add template to make these preferred
+    template <typename T>
+    requires (IsMutableColumns<T>::value)
+    static MutablePtr create(T && nested_column, size_t n_ = 0)
+    {
+        return Base::create(std::forward<T>(nested_column), n_);
+    }
 
     /** On the index i there is an offset to the beginning of the i + 1 -th element. */
     using ColumnOffsets = ColumnVector<Offset>;
@@ -221,6 +233,7 @@ public:
 private:
     WrappedPtr data;
     WrappedPtr offsets;
+    size_t N;
 
     size_t ALWAYS_INLINE offsetAt(ssize_t i) const { return getOffsets()[i - 1]; }
     size_t ALWAYS_INLINE sizeAt(ssize_t i) const { return getOffsets()[i] - getOffsets()[i - 1]; }

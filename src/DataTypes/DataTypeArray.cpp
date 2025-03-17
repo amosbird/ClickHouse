@@ -9,6 +9,7 @@
 
 #include <Common/typeid_cast.h>
 #include <Common/assert_cast.h>
+#include <Parsers/ASTLiteral.h>
 
 #include <Core/NamesAndTypes.h>
 #include <Columns/ColumnConst.h>
@@ -23,19 +24,20 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
+    extern const int UNEXPECTED_AST_STRUCTURE;
 }
 using FieldType = Array;
 
 
-DataTypeArray::DataTypeArray(const DataTypePtr & nested_)
-    : nested{nested_}
+DataTypeArray::DataTypeArray(const DataTypePtr & nested_, size_t n_)
+    : nested{nested_}, n(n_)
 {
 }
 
 
 MutableColumnPtr DataTypeArray::createColumn() const
 {
-    return ColumnArray::create(nested->createColumn(), ColumnArray::ColumnOffsets::create());
+    return ColumnArray::create(nested->createColumn(), ColumnArray::ColumnOffsets::create(), n);
 }
 
 Field DataTypeArray::getDefault() const
@@ -43,10 +45,10 @@ Field DataTypeArray::getDefault() const
     return Array();
 }
 
-
 bool DataTypeArray::equals(const IDataType & rhs) const
 {
-    return typeid(rhs) == typeid(*this) && nested->equals(*static_cast<const DataTypeArray &>(rhs).nested);
+    const auto & other = static_cast<const DataTypeArray &>(rhs);
+    return typeid(rhs) == typeid(*this) && nested->equals(*other.nested) && n == other.n;
 }
 
 SerializationPtr DataTypeArray::doGetDefaultSerialization() const
@@ -65,7 +67,10 @@ size_t DataTypeArray::getNumberOfDimensions() const
 String DataTypeArray::doGetPrettyName(size_t indent) const
 {
     WriteBufferFromOwnString s;
-    s << "Array(" << nested->getPrettyName(indent) << ')';
+    s << "Array(" << nested->getPrettyName(indent);
+    if (n > 0)
+        s << ", " << n;
+    s << ')';
     return s.str();
 }
 
@@ -98,10 +103,26 @@ std::unique_ptr<ISerialization::SubstreamData> DataTypeArray::getDynamicSubcolum
 
 static DataTypePtr create(const ASTPtr & arguments)
 {
-    if (!arguments || arguments->children.size() != 1)
-        throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH, "Array data type family must have exactly one argument - type of elements");
+    if (!arguments || arguments->children.size() > 2)
+    {
+        throw Exception(
+            ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
+            "Array data type family requires 1-2 arguments: element type and optional array size");
+    }
 
-    return std::make_shared<DataTypeArray>(DataTypeFactory::instance().get(arguments->children[0]));
+    size_t n = 0;
+
+    if (arguments->children.size() == 2)
+    {
+        const auto * argument = arguments->children[1]->as<ASTLiteral>();
+        if (!argument || argument->value.getType() != Field::Types::UInt64 || argument->value.safeGet<UInt64>() == 0)
+            throw Exception(ErrorCodes::UNEXPECTED_AST_STRUCTURE,
+                            "Array data type family must have a number (positive integer) as its second argument");
+
+        n = argument->value.safeGet<UInt64>();
+    }
+
+    return std::make_shared<DataTypeArray>(DataTypeFactory::instance().get(arguments->children[0]), n);
 }
 
 
