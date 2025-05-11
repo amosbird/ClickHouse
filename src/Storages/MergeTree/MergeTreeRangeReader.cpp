@@ -1,5 +1,6 @@
 #include <Storages/MergeTree/MergeTreeRangeReader.h>
 #include <Storages/MergeTree/IMergeTreeReader.h>
+#include <Storages/MergeTree/MergeTreeReadPoolProjectionIndex.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Columns/FilterDescription.h>
 #include <Columns/ColumnConst.h>
@@ -936,9 +937,22 @@ static String addDummyColumnWithRowCount(Block & block, size_t num_rows)
     return dummy_column.name;
 }
 
+static size_t getTotalBytesInColumns(const Columns & columns)
+{
+    size_t total_bytes = 0;
+    for (const auto & column : columns)
+        if (column)
+            total_bytes += column->byteSize();
+    return total_bytes;
+}
+
 MergeTreeRangeReader::ReadResult MergeTreeRangeReader::startReadingChain(size_t max_rows, MarkRanges & ranges)
 {
     ReadResult result(log);
+
+    if (projection_index_always_false)
+        return result;
+
     result.columns.resize(merge_tree_reader->getColumns().size());
 
     size_t current_task_last_mark = getLastMark(ranges);
@@ -1006,11 +1020,47 @@ MergeTreeRangeReader::ReadResult MergeTreeRangeReader::startReadingChain(size_t 
     result.num_rows = result.numReadRows();
 
     updatePerformanceCounters(result.numReadRows());
+    result.addNumBytesRead(getTotalBytesInColumns(result.columns));
+
+    /// TODO: when projection index is used, find a smallest column to read
+    if (!projection_index_bitmaps.empty())
+    {
+        ColumnPtr projection_filter;
+        if (projection_index_bitmaps.front()->type == ProjectionIndexBitmap::BitmapType::Bitmap32)
+            projection_filter = createProjectionIndexFilterColumn<UInt32>(result, leading_begin_part_offset, leading_end_part_offset);
+        else
+            projection_filter = createProjectionIndexFilterColumn<UInt64>(result, leading_begin_part_offset, leading_end_part_offset);
+
+        if (projection_filter)
+        {
+            result.final_filter = FilterWithCachedCount(projection_filter);
+        }
+        else
+        {
+            result.clear();
+            return result;
+        }
+    }
 
     return result;
 }
 
-void MergeTreeRangeReader::fillVirtualColumns(Columns & columns, ReadResult & result, UInt64 leading_begin_part_offset, UInt64 leading_end_part_offset)
+void MergeTreeRangeReader::setProjectionIndexBitmaps(ProjectionIndexBitmaps projection_index_bitmaps_)
+{
+    projection_index_bitmaps = std::move(projection_index_bitmaps_);
+
+    for (const auto & bitmap : projection_index_bitmaps)
+    {
+        if (bitmap->empty())
+        {
+            projection_index_always_false = true;
+            return;
+        }
+    }
+}
+
+void MergeTreeRangeReader::fillVirtualColumns(
+    Columns & columns, ReadResult & result, UInt64 leading_begin_part_offset, UInt64 leading_end_part_offset)
 {
     ColumnPtr part_offset_column;
 
@@ -1037,7 +1087,8 @@ void MergeTreeRangeReader::fillVirtualColumns(Columns & columns, ReadResult & re
         add_offset_column(BlockOffsetColumn::name);
 }
 
-ColumnPtr MergeTreeRangeReader::createPartOffsetColumn(ReadResult & result, UInt64 leading_begin_part_offset, UInt64 leading_end_part_offset)
+ColumnPtr
+MergeTreeRangeReader::createPartOffsetColumn(ReadResult & result, UInt64 leading_begin_part_offset, UInt64 leading_end_part_offset)
 {
     size_t num_rows = result.numReadRows();
 
@@ -1064,6 +1115,46 @@ ColumnPtr MergeTreeRangeReader::createPartOffsetColumn(ReadResult & result, UInt
     }
 
     return column;
+}
+
+template <typename Offset>
+ColumnPtr MergeTreeRangeReader::createProjectionIndexFilterColumn(
+    ReadResult & result, UInt64 leading_begin_part_offset, UInt64 leading_end_part_offset)
+{
+    size_t num_rows = result.numReadRows();
+    auto column = ColumnUInt8::create(num_rows, 0);
+    ColumnUInt8::Container & vec = column->getData();
+    UInt8 * pos = vec.data();
+
+    size_t current_offset = 0;
+    bool has_value = false;
+    auto fill_range = [&](UInt64 start, UInt64 end)
+    {
+        end = std::min(end, start + (num_rows - current_offset));
+        if (start >= end)
+            return;
+
+        ProjectionIndexBitmapPtr final_bitmap = ProjectionIndexBitmap::createFromRange<Offset>(start, end);
+        for (const auto & bitmap : projection_index_bitmaps)
+            final_bitmap->intersectWith(*bitmap);
+
+        has_value |= final_bitmap->fillBits<Offset>(pos + current_offset, start, end);
+        current_offset += end - start;
+    };
+
+    fill_range(leading_begin_part_offset, leading_end_part_offset);
+    const auto & start_ranges = result.started_ranges;
+    for (const auto & start_range : start_ranges)
+    {
+        UInt64 start_part_offset = index_granularity->getMarkStartingRow(start_range.range.begin);
+        UInt64 end_part_offset = index_granularity->getMarkStartingRow(start_range.range.end);
+        fill_range(start_part_offset, end_part_offset);
+    }
+
+    if (has_value)
+        return column;
+    else
+        return nullptr;
 }
 
 Columns MergeTreeRangeReader::continueReadingChain(ReadResult & result, size_t & num_rows)
@@ -1126,6 +1217,7 @@ Columns MergeTreeRangeReader::continueReadingChain(ReadResult & result, size_t &
     fillVirtualColumns(columns, result, leading_begin_part_offset, leading_end_part_offset);
 
     updatePerformanceCounters(num_rows);
+    result.addNumBytesRead(getTotalBytesInColumns(result.columns));
 
     return columns;
 }

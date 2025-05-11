@@ -82,7 +82,11 @@ MergeTreeReadTask::Readers MergeTreeReadTask::createReaders(
     return new_readers;
 }
 
-MergeTreeReadersChain MergeTreeReadTask::createReadersChain(const Readers & task_readers, const PrewhereExprInfo & prewhere_actions, ReadStepsPerformanceCounters & read_steps_performance_counters)
+MergeTreeReadersChain MergeTreeReadTask::createReadersChain(
+    const Readers & task_readers,
+    const PrewhereExprInfo & prewhere_actions,
+    ReadStepsPerformanceCounters & read_steps_performance_counters,
+    const ProjectionIndexBitmapsBuilder & projection_index_builder)
 {
     if (prewhere_actions.steps.size() != task_readers.prewhere.size())
         throw Exception(
@@ -113,15 +117,21 @@ MergeTreeReadersChain MergeTreeReadTask::createReadersChain(const Readers & task
             /*main_reader_=*/ true);
     }
 
+    if (!range_readers.empty() && projection_index_builder)
+        range_readers.front().setProjectionIndexBitmaps(projection_index_builder());
+
     return MergeTreeReadersChain{std::move(range_readers)};
 }
 
-void MergeTreeReadTask::initializeReadersChain(const PrewhereExprInfo & prewhere_actions, ReadStepsPerformanceCounters & read_steps_performance_counters)
+void MergeTreeReadTask::initializeReadersChain(
+    const PrewhereExprInfo & prewhere_actions,
+    ReadStepsPerformanceCounters & read_steps_performance_counters,
+    const ProjectionIndexBitmapsBuilder & projection_index_builder)
 {
     if (readers_chain.isInitialized())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Range readers chain is already initialized");
 
-    readers_chain = createReadersChain(readers, prewhere_actions, read_steps_performance_counters);
+    readers_chain = createReadersChain(readers, prewhere_actions, read_steps_performance_counters, projection_index_builder);
 }
 
 UInt64 MergeTreeReadTask::estimateNumRows() const

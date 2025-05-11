@@ -20,6 +20,10 @@ using PrewhereInfoPtr = std::shared_ptr<PrewhereInfo>;
 class ExpressionActions;
 using ExpressionActionsPtr = std::shared_ptr<ExpressionActions>;
 
+struct ProjectionIndexBitmap;
+using ProjectionIndexBitmapPtr = std::shared_ptr<ProjectionIndexBitmap>;
+using ProjectionIndexBitmaps = std::vector<ProjectionIndexBitmapPtr>;
+
 struct PrewhereExprStep
 {
     enum Type
@@ -342,9 +346,14 @@ public:
 
     IMergeTreeReader * getReader() const { return merge_tree_reader; }
 
+    void setProjectionIndexBitmaps(ProjectionIndexBitmaps projection_index_bitmaps_);
+
 private:
     void fillVirtualColumns(Columns & columns, ReadResult & result, UInt64 leading_begin_part_offset, UInt64 leading_end_part_offset);
     ColumnPtr createPartOffsetColumn(ReadResult & result, UInt64 leading_begin_part_offset, UInt64 leading_end_part_offset);
+
+    template <typename Offset>
+    ColumnPtr createProjectionIndexFilterColumn(ReadResult & result, UInt64 leading_begin_part_offset, UInt64 leading_end_part_offset);
 
     void updatePerformanceCounters(size_t num_rows_read);
 
@@ -359,6 +368,9 @@ private:
 
     ReadStepPerformanceCountersPtr performance_counters;
     bool main_reader = false; /// Whether it is the main reader or one of the readers for prewhere steps
+
+    ProjectionIndexBitmaps projection_index_bitmaps;
+    bool projection_index_always_false = false;
 
     LoggerPtr log = getLogger("MergeTreeRangeReader");
 };

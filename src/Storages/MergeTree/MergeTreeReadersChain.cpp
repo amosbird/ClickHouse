@@ -10,15 +10,6 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
-static size_t getTotalBytesInColumns(const Columns & columns)
-{
-    size_t total_bytes = 0;
-    for (const auto & column : columns)
-        if (column)
-            total_bytes += column->byteSize();
-    return total_bytes;
-}
-
 MergeTreeReadersChain::MergeTreeReadersChain(RangeReaders range_readers_)
     : range_readers(std::move(range_readers_))
     , is_initialized(true)
@@ -65,25 +56,22 @@ MergeTreeReadersChain::ReadResult MergeTreeReadersChain::read(size_t max_rows, M
 
     auto & first_reader = range_readers.front();
     auto read_result = first_reader.startReadingChain(max_rows, ranges);
-    read_result.addNumBytesRead(getTotalBytesInColumns(read_result.columns));
 
     LOG_TEST(log, "First reader returned: {}, requested columns: {}", read_result.dumpInfo(), first_reader.getSampleBlock().dumpNames());
 
-    if (read_result.num_rows != 0)
-    {
-        first_reader.executeActionsBeforePrewhere(read_result, read_result.columns, {}, read_result.num_rows);
-        executePrewhereActions(first_reader, read_result, {}, range_readers.size() == 1);
-    }
+    if (read_result.num_rows == 0)
+        return read_result;
+
+    first_reader.executeActionsBeforePrewhere(read_result, read_result.columns, {}, read_result.num_rows);
+    executePrewhereActions(first_reader, read_result, {}, range_readers.size() == 1);
 
     for (size_t i = 1; i < range_readers.size(); ++i)
     {
         size_t num_read_rows = 0;
         auto columns = range_readers[i].continueReadingChain(read_result, num_read_rows);
-        read_result.addNumBytesRead(getTotalBytesInColumns(columns));
 
-        /// Even if number of read rows is 0 we need to apply all steps to produce a block with correct structure.
         if (read_result.num_rows == 0)
-            continue;
+            return read_result;
 
         const auto & previous_header = range_readers[i - 1].getSampleBlock();
 

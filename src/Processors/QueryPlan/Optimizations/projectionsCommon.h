@@ -45,20 +45,29 @@ struct ProjectionCandidate
     /// Analysis is done in order to estimate the number of marks we are going to read.
     /// For chosen projection, it is reused for reading step.
     ReadFromMergeTree::AnalysisResultPtr merge_tree_projection_select_result_ptr;
-    ReadFromMergeTree::AnalysisResultPtr merge_tree_ordinary_select_result_ptr;
+
+    RangesInDataParts parent_parts;
 };
 
 /// This function fills ProjectionCandidate structure for specified projection.
 /// It returns false if for some reason we cannot read from projection.
 bool analyzeProjectionCandidate(
     ProjectionCandidate & candidate,
-    const ReadFromMergeTree & reading,
     const MergeTreeDataSelectExecutor & reader,
+    MergeTreeData::MutationsSnapshotPtr empty_mutations_snapshot,
     const Names & required_column_names,
-    const RangesInDataParts & parts_with_ranges,
-    const SelectQueryInfo & query_info,
-    const ContextPtr & context,
-    const PartitionIdToMaxBlockPtr & max_added_blocks,
-    const ActionsDAG * dag);
+    RangesInDataParts & parts_with_ranges,
+    const SelectQueryInfo & projection_query_info,
+    const ContextPtr & context);
+
+void collectProjectionIndexCandidate(
+    ReadFromMergeTree & reading,
+    const ProjectionDescription & projection,
+    const MergeTreeDataSelectExecutor & reader,
+    MergeTreeData::MutationsSnapshotPtr empty_mutations_snapshot,
+    RangesInDataParts & parts_with_ranges,
+    const SelectQueryInfo & projection_query_info,
+    const ActionsDAG::Node * filter_node,
+    const ContextPtr & context);
 
 }
