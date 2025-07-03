@@ -133,3 +133,41 @@ inline void ALWAYS_INLINE keyHolderDiscardKey(DB::SerializedKeyHolder & holder)
     holder.key.size = 0;
 }
 
+namespace DB
+{
+struct ArenaABStringHolder
+{
+    StringRef key;
+    Arena & pool;
+};
+}
+
+inline StringRef & ALWAYS_INLINE keyHolderGetKey(DB::ArenaABStringHolder & holder)
+{
+    return holder.key;
+}
+
+inline void ALWAYS_INLINE keyHolderPersistKey(DB::ArenaABStringHolder & holder)
+{
+    if (holder.key.data == nullptr)
+        return;
+
+    if ((reinterpret_cast<uintptr_t>(holder.key.data) >> 63) == 1) [[unlikely]]
+    {
+        holder.key.data = holder.pool.insert(
+            reinterpret_cast<const char *>(reinterpret_cast<uintptr_t>(holder.key.data) & ~(1ULL << 63)), holder.key.size);
+        holder.key.data = reinterpret_cast<const char *>(reinterpret_cast<uintptr_t>(holder.key.data) | (1ULL << 63));
+        return;
+    }
+
+    size_t inlined_size = reinterpret_cast<uintptr_t>(holder.key.data) >> 59;
+
+    if (inlined_size > 0)
+        return;
+
+    holder.key.data = holder.pool.insert(holder.key.data, holder.key.size >> 32);
+}
+
+inline void ALWAYS_INLINE keyHolderDiscardKey(DB::ArenaABStringHolder &)
+{
+}

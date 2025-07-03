@@ -120,6 +120,42 @@ struct AggregationMethodStringNoCache
     static void insertKeyIntoColumns(StringRef key, std::vector<IColumn *> & key_columns, const Sizes &);
 };
 
+/// Same as above but without cache
+template <typename TData, bool nullable = false>
+struct AggregationMethodABStringNoCache
+{
+    using Data = TData;
+    using Key = typename Data::key_type;
+    using Mapped = typename Data::mapped_type;
+
+    Data data;
+
+    AggregationMethodABStringNoCache() = default;
+
+    explicit AggregationMethodABStringNoCache(size_t size_hint) : data(size_hint) { }
+
+    template <typename Other>
+    explicit AggregationMethodABStringNoCache(const Other & other) : data(other.data)
+    {
+    }
+
+    template <bool use_cache>
+    using StateImpl = ColumnsHashing::HashMethodABString<typename Data::value_type, Mapped, true, false, false, nullable>;
+
+    using State = StateImpl<true>;
+    using StateNoCache = StateImpl<false>;
+
+    static const bool low_cardinality_optimization = false;
+    static const bool one_key_nullable_optimization = nullable;
+
+    std::optional<Sizes> shuffleKeyColumns(std::vector<IColumn *> &, const Sizes &) { return {}; }
+
+    static void insertKeyIntoColumns(StringRef key, std::vector<IColumn *> & key_columns, const Sizes &)
+    {
+        static_cast<ColumnString *>(key_columns[0])->insertData(key.data, key.size);
+    }
+};
+
 /// For the case where there is one fixed-length string key.
 template <typename TData>
 struct AggregationMethodFixedString
