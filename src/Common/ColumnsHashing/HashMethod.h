@@ -234,15 +234,39 @@ struct HashMethodABString : public columns_hashing_impl::HashMethodBase<
                 return inline_str;
             }
 
-            if (len > std::numeric_limits<UInt32>::max())
+            if (len > std::numeric_limits<UInt32>::max()) [[unlikely]]
+            {
                 return ArenaABStringHolder{
                     {reinterpret_cast<const char *>(reinterpret_cast<uintptr_t>(chars + offsets[row - 1]) | (1ULL << 63)), len}, pool};
+            }
+
+            size_t encoded_len;
+            const UInt8 * ptr = chars + offsets[row - 1];
+            if (len < 256)
+            {
+                encoded_len = (len << 24) | ptr[len - 1] | (ptr[len - 2] << 8) | (ptr[len - 3] << 16);
+                ptr = reinterpret_cast<const UInt8 *>(reinterpret_cast<uintptr_t>(ptr) | 0x0600000000000000);
+            }
+            else if (len < 65536)
+            {
+                encoded_len = (len << 16) | ptr[len - 1] | (ptr[len - 2] << 8);
+                ptr = reinterpret_cast<const UInt8 *>(reinterpret_cast<uintptr_t>(ptr) | 0x0400000000000000);
+            }
+            else if (len < 16777216)
+            {
+                encoded_len = (len << 8) | ptr[len - 1];
+                ptr = reinterpret_cast<const UInt8 *>(reinterpret_cast<uintptr_t>(ptr) | 0x0200000000000000);
+            }
+            else
+            {
+                encoded_len = len;
+            }
 
             if constexpr (has_pre_computed_hashes)
-                return ArenaABStringHolder{{chars + offsets[row - 1], (len << 32) | (hashes.getData()[row] & ((1ULL << 32) - 1))}, pool};
+                return ArenaABStringHolder{{ptr, (encoded_len << 32) | (hashes.getData()[row] & ((1ULL << 32) - 1))}, pool};
             else
                 return ArenaABStringHolder{
-                    {chars + offsets[row - 1], (len << 32) | (StringRefHash()({chars + offsets[row - 1], len}) & ((1ULL << 32) - 1))},
+                    {ptr, (encoded_len << 32) | (StringRefHash()({chars + offsets[row - 1], len}) & ((1ULL << 32) - 1))},
                     pool};
         }
         else

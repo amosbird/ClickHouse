@@ -165,7 +165,11 @@ inline void ALWAYS_INLINE keyHolderPersistKey(DB::ArenaABStringHolder & holder)
     if (inlined_size > 0)
         return;
 
-    holder.key.data = holder.pool.insert(holder.key.data, holder.key.size >> 32);
+    size_t self_size_bytes = reinterpret_cast<uintptr_t>(holder.key.data) >> 57;
+    size_t size = holder.key.size >> (32 + self_size_bytes * 8);
+    const char * self_ptr = reinterpret_cast<const char *>(reinterpret_cast<uintptr_t>(holder.key.data) & 0X00FFFFFFFFFFFFFF);
+    holder.key.data
+        = reinterpret_cast<const char *>(reinterpret_cast<uintptr_t>(holder.pool.insert(self_ptr, size)) | (self_size_bytes << 57));
 }
 
 inline void ALWAYS_INLINE keyHolderDiscardKey(DB::ArenaABStringHolder &)

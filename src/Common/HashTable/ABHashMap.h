@@ -69,7 +69,10 @@ struct ABHashMapCell
         if (inlined_size > 0)
             return {reinterpret_cast<const char *>(reinterpret_cast<uintptr_t>(&this->value.first) + 1), inlined_size};
 
-        return StringRef(this->value.first.data, this->value.first.size >> 32);
+        size_t self_size_bytes = reinterpret_cast<uintptr_t>(this->value.first.data) >> 57;
+        size_t size = value.first.size >> (32 + self_size_bytes * 8);
+        const char * self_ptr = reinterpret_cast<const char *>(reinterpret_cast<uintptr_t>(this->value.first.data) & 0X00FFFFFFFFFFFFFF);
+        return StringRef(self_ptr, size);
     }
 
     Mapped & getMapped() { return value.second; }
@@ -117,12 +120,19 @@ struct ABHashMapCell
         if (value.first.size != key_.size)
             return false;
 
-        size_t size = value.first.size >> 32;
+        size_t self_size_bytes = reinterpret_cast<uintptr_t>(value.first.data) >> 57;
+        size_t key_size_bytes = reinterpret_cast<uintptr_t>(key_.data) >> 57;
+        if (self_size_bytes != key_size_bytes)
+            return false;
+
+        size_t size = value.first.size >> (32 + self_size_bytes * 8);
+        const char * self_ptr = reinterpret_cast<const char *>(reinterpret_cast<uintptr_t>(value.first.data) & 0X00FFFFFFFFFFFFFF);
+        const char * key_ptr = reinterpret_cast<const char *>(reinterpret_cast<uintptr_t>(key_.data) & 0X00FFFFFFFFFFFFFF);
 
 #if defined(__SSE2__) || (defined(__aarch64__) && defined(__ARM_NEON))
-        return memequalWide(value.first.data, key_.data, size);
+        return memequalWide(self_ptr, key_ptr, size);
 #else
-        return 0 == memcmp(value.first.data, key_.data, size);
+        return 0 == memcmp(self_ptr, key_ptr, size);
 #endif
     }
 
