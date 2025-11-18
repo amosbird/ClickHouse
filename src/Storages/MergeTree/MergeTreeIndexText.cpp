@@ -1310,7 +1310,8 @@ MergeTreeIndexText::parseTextIndexArguments(const String & index_name, const Fie
            SplitByNonAlphaTokenExtractor::getExternalName(),
            SplitByStringTokenExtractor::getExternalName(),
            ArrayTokenExtractor::getExternalName(),
-           SparseGramsTokenExtractor::getExternalName()};
+           SparseGramsTokenExtractor::getExternalName(),
+           StandardTokenExtractor::getExternalName()};
 
     auto token_extractor = TokenizerFactory::createTokenizer(tokenizer, params, allowed_tokenizers, index_name);
 
@@ -1346,7 +1347,8 @@ void textIndexValidator(const IndexDescription & index, bool /*attach*/)
            SplitByNonAlphaTokenExtractor::getExternalName(),
            SplitByStringTokenExtractor::getExternalName(),
            ArrayTokenExtractor::getExternalName(),
-           SparseGramsTokenExtractor::getExternalName()};
+           SparseGramsTokenExtractor::getExternalName(),
+           StandardTokenExtractor::getExternalName()};
 
     TokenizerFactory::createTokenizer(tokenizer, params, allowed_tokenizers, index.name, /*only_validate = */ true);
 
