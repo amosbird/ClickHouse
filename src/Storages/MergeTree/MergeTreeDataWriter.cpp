@@ -671,12 +671,19 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeTempPartImpl(
             indices = MergeTreeIndexFactory::instance().getMany(metadata_snapshot->getSecondaryIndices());
     }
 
-    /// If we need to calculate some columns to sort.
-    if (metadata_snapshot->hasSortingKey() || metadata_snapshot->hasSecondaryIndices())
+    std::vector<ProjectionDescriptionRawPtr> projection_indices;
+    for (const auto & projection : metadata_snapshot->getProjections())
     {
-        auto expr = data.getSortingKeyAndSkipIndicesExpression(metadata_snapshot, indices);
+        if (projection.index && projection.index->getIndexDescription())
+            projection_indices.push_back(&projection);
+    }
+
+    /// If we need to calculate some columns to sort.
+    if (metadata_snapshot->hasSortingKey() || metadata_snapshot->hasSecondaryIndices() || !projection_indices.empty())
+    {
+        auto expr = data.getSortingKeyAndIndicesExpression(metadata_snapshot, indices, projection_indices);
         addSubcolumnsFromSortingKeyAndSkipIndicesExpression(expr, block);
-        data.getSortingKeyAndSkipIndicesExpression(metadata_snapshot, indices)->execute(block);
+        expr->execute(block);
     }
 
     Names sort_columns = metadata_snapshot->getSortingKeyColumns();
@@ -899,14 +906,23 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeTempPartImpl(
         context->getWriteSettings(),
         static_cast<WrittenOffsetSubstreams *>(nullptr));
 
-    out->writeWithPermutation(block, perm_ptr);
-
+    Block permuted_columns_cache;
     for (const auto & projection : metadata_snapshot->getProjections())
     {
         Block projection_block;
+        if (projection.index && projection.index->getIndexDescription())
+        {
+            projection_block
+                = getIndexBlockAndPermute(block, projection.index->getIndexDescription()->column_names, perm_ptr, &permuted_columns_cache);
+        }
+        else
+        {
+            projection_block = block;
+        }
+
         {
             ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::MergeTreeDataWriterProjectionsCalculationMicroseconds);
-            projection_block = projection.calculate(block, 0, context, perm_ptr);
+            projection_block = projection.calculate(projection_block, 0, context, perm_ptr);
             LOG_DEBUG(
                 log, "Spent {} ms calculating projection {} for the part {}", watch.elapsed() / 1000, projection.name, new_data_part->name);
         }
@@ -921,6 +937,7 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeTempPartImpl(
         }
     }
 
+    out->writeWithPermutation(block, perm_ptr, &permuted_columns_cache);
     out->finalizeIndexGranularity();
     auto finalizer = out->finalizePartAsync(
         new_data_part,
@@ -959,7 +976,7 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeProjectionPartImpl(
 
     auto new_data_part = parent_part->getProjectionPartBuilder(part_name, &projection, is_temp).withPartType(part_type).build();
     auto projection_part_storage = new_data_part->getDataPartStoragePtr();
-    auto data_settings = data.getSettings(&projection);
+    auto data_settings = data.getSettings(&projection.settings_changes);
 
     if (is_temp)
         projection_part_storage->beginTransaction();
@@ -991,7 +1008,7 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeProjectionPartImpl(
 
     /// If we need to calculate some columns to sort.
     if (metadata_snapshot->hasSortingKey() || metadata_snapshot->hasSecondaryIndices())
-        data.getSortingKeyAndSkipIndicesExpression(metadata_snapshot, {})->execute(block);
+        data.getSortingKeyAndIndicesExpression(metadata_snapshot, {}, {})->execute(block);
 
     Names sort_columns = metadata_snapshot->getSortingKeyColumns();
     std::vector<bool> reverse_flags = metadata_snapshot->getSortingKeyReverseFlags();
@@ -1033,7 +1050,7 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeProjectionPartImpl(
         perm_ptr = &perm;
     }
 
-    if (projection.type == ProjectionDescription::Type::Aggregate && merge_is_needed)
+    if (projection.type == ProjectionDescription::Type::Aggregate && !projection.index && merge_is_needed)
     {
         ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::MergeTreeDataProjectionWriterMergingBlocksMicroseconds);
 
@@ -1068,7 +1085,8 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeProjectionPartImpl(
         data.getContext()->getWriteSettings(),
         static_cast<WrittenOffsetSubstreams *>(nullptr));
 
-    out->writeWithPermutation(block, perm_ptr);
+    Block permuted_columns_cache;
+    out->writeWithPermutation(block, perm_ptr, &permuted_columns_cache);
     out->finalizeIndexGranularity();
     auto finalizer = out->finalizePartAsync(new_data_part, IMergedBlockOutputStream::GatheredData{}, false);
     temp_part->part = new_data_part;

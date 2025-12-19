@@ -80,6 +80,18 @@ namespace ErrorCodes
     extern const int NOT_IMPLEMENTED;
 }
 
+/// Closed range of rows.
+struct RowsRange
+{
+    size_t begin;
+    size_t end;
+
+    RowsRange() = default;
+    RowsRange(size_t begin_, size_t end_) : begin(begin_), end(end_) {}
+
+    bool intersects(const RowsRange & other) const;
+};
+
 /// Stores some info about a single block of data.
 struct IMergeTreeIndexGranule
 {
@@ -115,6 +127,10 @@ struct IMergeTreeIndexGranule
 
     /// The in-memory size of the granule. Not expected to be 100% accurate.
     virtual size_t memoryUsageBytes() const = 0;
+
+    /// Updates the range of rows currently being processed.
+    /// Some indices (e.g. text indices) may use this information to make more precise `mayBeTrueOnGranule` decisions.
+    virtual void setCurrentRange(RowsRange) {}
 };
 
 using MergeTreeIndexGranulePtr = std::shared_ptr<IMergeTreeIndexGranule>;
@@ -290,6 +306,7 @@ struct IMergeTreeIndex
 
     virtual bool isVectorSimilarityIndex() const { return false; }
     virtual bool isTextIndex() const { return false; }
+    virtual bool isProjectionIndex() const { return false; }
 
     Names getColumnsRequiredForIndexCalc() const;
 
