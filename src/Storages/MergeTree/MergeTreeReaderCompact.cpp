@@ -1,5 +1,6 @@
 #include <Storages/MergeTree/MergeTreeReaderCompact.h>
 #include <Storages/MergeTree/MergeTreeDataPartCompact.h>
+#include <Storages/MergeTree/ProjectionIndex/ProjectionIndexDeserializationContext.h>
 #include <Storages/MergeTree/checkDataPart.h>
 #include <Storages/MergeTree/DeserializationPrefixesCache.h>
 #include <DataTypes/Serializations/getSubcolumnsDeserializationOrder.h>
@@ -204,6 +205,11 @@ void MergeTreeReaderCompact::readData(
         deserialize_settings.getter = buffer_getter;
         deserialize_settings.use_specialized_prefixes_and_suffixes_substreams = true;
         deserialize_settings.data_part_type = MergeTreeDataPartType::Compact;
+
+        ProjectionIndexDeserializationContext projection_index_context{
+            data_part_info_for_read->getMergedPartOffsets(), data_part_info_for_read->getPartIndex(), 0, 0};
+        deserialize_settings.projection_index_context = &projection_index_context;
+
         deserialize_settings.get_avg_value_size_hint_callback
             = [&](const ISerialization::SubstreamPath & substream_path) -> double
         {

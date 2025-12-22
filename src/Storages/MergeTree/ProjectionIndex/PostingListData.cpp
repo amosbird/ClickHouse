@@ -1,0 +1,460 @@
+#include <Storages/MergeTree/ProjectionIndex/PostingListData.h>
+
+#include <IO/WriteBuffer.h>
+#include <IO/WriteHelpers.h>
+#include <Storages/MergeTree/MergedPartOffsets.h>
+#include <Common/Arena.h>
+#include <Common/Exception.h>
+
+#include <vp4.h>
+
+namespace DB
+{
+
+namespace ErrorCodes
+{
+    extern const int ATTEMPT_TO_READ_AFTER_EOF;
+    extern const int INCORRECT_DATA;
+    extern const int LOGICAL_ERROR;
+}
+
+namespace VarInt
+{
+
+void throwReadAfterEOF()
+{
+    throw Exception(ErrorCodes::ATTEMPT_TO_READ_AFTER_EOF, "Attempt to read after eof");
+}
+
+inline UInt32 readVarUInt32(const uint8_t *& istr)
+{
+    const UInt8 first_byte = *istr++;
+
+    if (first_byte <= 176)
+        return first_byte;
+
+    const UInt8 second_byte = *istr++;
+
+    if (first_byte <= 240)
+        return ((first_byte - 177) << 8) + second_byte + 177;
+
+    const UInt8 third_byte = *istr++;
+
+    if (first_byte <= 248)
+        return ((first_byte - 241) << 16) + (second_byte << 8) + third_byte + 16561;
+
+    const UInt8 fourth_byte = *istr++;
+
+    if (first_byte == 249)
+        return (second_byte << 16) | (third_byte << 8) | fourth_byte;
+
+    const UInt8 fifth_byte = *istr++;
+
+    return (UInt32(second_byte) << 24) | (UInt32(third_byte) << 16) | (UInt32(fourth_byte) << 8) | fifth_byte;
+}
+
+template <bool check_eof>
+inline void readVarUInt32Impl(UInt32 & x, ReadBuffer & istr)
+{
+    /// First byte determines the encoding format
+    if constexpr (check_eof)
+        if (istr.eof()) [[unlikely]]
+            throwReadAfterEOF();
+
+    const UInt8 first_byte = *istr.position()++;
+
+    if (first_byte <= 176)
+    {
+        /// Single byte encoding
+        x = first_byte;
+        return;
+    }
+
+    /// Multi-byte encoding - check if we have enough data
+    if constexpr (check_eof)
+        if (istr.eof()) [[unlikely]]
+            throwReadAfterEOF();
+
+    const UInt8 second_byte = *istr.position()++;
+
+    if (first_byte <= 240)
+    {
+        /// Two-byte encoding
+        x = ((first_byte - 177) << 8) + second_byte + 177;
+        return;
+    }
+
+    /// Three or more bytes - check if we have enough data
+    if constexpr (check_eof)
+        if (istr.eof()) [[unlikely]]
+            throwReadAfterEOF();
+
+    const UInt8 third_byte = *istr.position()++;
+
+    if (first_byte <= 248)
+    {
+        /// Three-byte encoding
+        x = ((first_byte - 241) << 16) + (second_byte << 8) + third_byte + 16561;
+        return;
+    }
+
+    /// Four or five bytes - check if we have enough data
+    if constexpr (check_eof)
+        if (istr.eof()) [[unlikely]]
+            throwReadAfterEOF();
+
+    const UInt8 fourth_byte = *istr.position()++;
+
+    if (first_byte == 249)
+    {
+        /// Four-byte encoding
+        x = (second_byte << 16) | (third_byte << 8) | fourth_byte;
+        return;
+    }
+
+    /// Five-byte encoding - check if we have enough data
+    if constexpr (check_eof)
+        if (istr.eof()) [[unlikely]]
+            throwReadAfterEOF();
+
+    const UInt8 fifth_byte = *istr.position()++;
+
+    /// Five-byte encoding
+    x = (UInt32(second_byte) << 24) | (UInt32(third_byte) << 16) | (UInt32(fourth_byte) << 8) | fifth_byte;
+}
+
+template <bool check_eof>
+inline void writeVarUInt32Impl(UInt32 x, WriteBuffer & ostr)
+{
+    /// Choose encoding based on the value range
+    if (x <= 176)
+    {
+        /// Single byte encoding
+        if constexpr (check_eof)
+            ostr.nextIfAtEnd();
+        *ostr.position() = static_cast<uint8_t>(x);
+        ++ostr.position();
+        return;
+    }
+
+    if (x <= 16560)
+    {
+        /// Two-byte encoding
+        x -= 177;
+        if constexpr (check_eof)
+            ostr.nextIfAtEnd();
+        *ostr.position() = static_cast<uint8_t>(177 + (x >> 8));
+        ++ostr.position();
+        if constexpr (check_eof)
+            ostr.nextIfAtEnd();
+        *ostr.position() = static_cast<uint8_t>(x & 0xFF);
+        ++ostr.position();
+        return;
+    }
+
+    if (x <= 540848)
+    {
+        /// Three-byte encoding
+        x -= 16561;
+        if constexpr (check_eof)
+            ostr.nextIfAtEnd();
+        *ostr.position() = static_cast<uint8_t>(241 + (x >> 16));
+        ++ostr.position();
+        if constexpr (check_eof)
+            ostr.nextIfAtEnd();
+        *ostr.position() = static_cast<uint8_t>((x >> 8) & 0xFF);
+        ++ostr.position();
+        if constexpr (check_eof)
+            ostr.nextIfAtEnd();
+        *ostr.position() = static_cast<uint8_t>(x & 0xFF);
+        ++ostr.position();
+        return;
+    }
+
+    if (x <= 16777215)
+    {
+        /// Four-byte encoding
+        if constexpr (check_eof)
+            ostr.nextIfAtEnd();
+        *ostr.position() = static_cast<uint8_t>(249);
+        ++ostr.position();
+        if constexpr (check_eof)
+            ostr.nextIfAtEnd();
+        *ostr.position() = static_cast<uint8_t>((x >> 16) & 0xFF);
+        ++ostr.position();
+        if constexpr (check_eof)
+            ostr.nextIfAtEnd();
+        *ostr.position() = static_cast<uint8_t>((x >> 8) & 0xFF);
+        ++ostr.position();
+        if constexpr (check_eof)
+            ostr.nextIfAtEnd();
+        *ostr.position() = static_cast<uint8_t>(x & 0xFF);
+        ++ostr.position();
+        return;
+    }
+
+    /// Five-byte encoding
+    if constexpr (check_eof)
+        ostr.nextIfAtEnd();
+    *ostr.position() = static_cast<uint8_t>(250);
+    ++ostr.position();
+    if constexpr (check_eof)
+        ostr.nextIfAtEnd();
+    *ostr.position() = static_cast<uint8_t>((x >> 24) & 0xFF);
+    ++ostr.position();
+    if constexpr (check_eof)
+        ostr.nextIfAtEnd();
+    *ostr.position() = static_cast<uint8_t>((x >> 16) & 0xFF);
+    ++ostr.position();
+    if constexpr (check_eof)
+        ostr.nextIfAtEnd();
+    *ostr.position() = static_cast<uint8_t>((x >> 8) & 0xFF);
+    ++ostr.position();
+    if constexpr (check_eof)
+        ostr.nextIfAtEnd();
+    *ostr.position() = static_cast<uint8_t>(x & 0xFF);
+    ++ostr.position();
+}
+
+inline void readVarUInt32(UInt32 & x, ReadBuffer & istr)
+{
+    if (istr.available() >= 5)
+        readVarUInt32Impl<false>(x, istr);
+    else
+        readVarUInt32Impl<true>(x, istr);
+}
+
+inline void writeVarUInt32(UInt32 x, WriteBuffer & ostr)
+{
+    if (ostr.available() >= 5)
+        writeVarUInt32Impl<false>(x, ostr);
+    else
+        writeVarUInt32Impl<true>(x, ostr);
+}
+
+}
+
+void PostingListChunk::write(WriteBuffer & wb) const
+{
+    wb.write(reinterpret_cast<const char *>(data()), len);
+}
+
+void PostingListWriter::add(UInt32 doc_id, Arena * arena, uint8_t * packed_buffer)
+{
+    if (doc_count == 0)
+    {
+        first_doc_id = doc_id;
+        last_doc_id = doc_id;
+        ++doc_count;
+        return;
+    }
+
+    if (doc_id < last_doc_id)
+        throw Exception(ErrorCodes::INCORRECT_DATA, "Received out of order doc id. doc_id = {}, last_doc_id = {}", doc_id, last_doc_id);
+
+    if (doc_id == last_doc_id)
+        return;
+
+    switch (doc_count)
+    {
+        case 1:
+            doc_delta_buffer = reinterpret_cast<UInt32 *>(arena->alignedAlloc(4 * 4, 4));
+            break;
+        case 5:
+            doc_delta_buffer
+                = reinterpret_cast<UInt32 *>(arena->alignedRealloc(reinterpret_cast<char *>(doc_delta_buffer), 4 * 4, 8 * 4, 4));
+            break;
+        case 9:
+            doc_delta_buffer
+                = reinterpret_cast<UInt32 *>(arena->alignedRealloc(reinterpret_cast<char *>(doc_delta_buffer), 8 * 4, 16 * 4, 4));
+            break;
+        case 17:
+            doc_delta_buffer
+                = reinterpret_cast<UInt32 *>(arena->alignedRealloc(reinterpret_cast<char *>(doc_delta_buffer), 16 * 4, 32 * 4, 4));
+            break;
+        case 33:
+            doc_delta_buffer
+                = reinterpret_cast<UInt32 *>(arena->alignedRealloc(reinterpret_cast<char *>(doc_delta_buffer), 32 * 4, 64 * 4, 4));
+            break;
+        case 65:
+            doc_delta_buffer
+                = reinterpret_cast<UInt32 *>(arena->alignedRealloc(reinterpret_cast<char *>(doc_delta_buffer), 64 * 4, 128 * 4, 16));
+            break;
+        default:
+            break;
+    }
+
+    UInt8 doc_buffer_up_to = (doc_count - 1) % 128;
+    UInt32 doc_delta = doc_id - last_doc_id - 1;
+    doc_delta_buffer[doc_buffer_up_to] = doc_delta;
+
+    last_doc_id = doc_id;
+    ++doc_buffer_up_to;
+    ++doc_count;
+
+    if (doc_buffer_up_to == 128)
+    {
+        uint8_t * packed_buffer_end = p4enc128v32(doc_delta_buffer, 128, packed_buffer);
+        size_t len = static_cast<UInt32>(packed_buffer_end - packed_buffer);
+        chassert(len <= 512);
+        auto * place = arena->alignedAlloc(len + sizeof(PostingListChunk), alignof(PostingListChunk));
+        PostingListChunk * cur_block = new (place) PostingListChunk(len);
+        memcpy(cur_block->data(), packed_buffer, len);
+        if (!blocks_head)
+            blocks_head = cur_block;
+        else
+            *blocks_tail = cur_block;
+        blocks_tail = &cur_block->next;
+    }
+}
+
+void PostingListWriter::finish(WriteBuffer & wb, uint8_t * packed_buffer) const
+{
+    size_t write_bytes = wb.count();
+    VarInt::writeVarUInt32(doc_count, wb);
+    if (doc_count == 0)
+        return;
+
+    VarInt::writeVarUInt32(first_doc_id, wb);
+
+    PostingListChunk * it = blocks_head;
+    while (it != nullptr)
+    {
+        VarInt::writeVarUInt32(it->len, wb);
+        it->write(wb);
+        it = it->next;
+    }
+
+    UInt8 doc_buffer_up_to = (doc_count - 1) % 128;
+    if (doc_buffer_up_to > 0)
+    {
+        uint8_t * packed_buffer_end = p4enc32(doc_delta_buffer, doc_buffer_up_to, packed_buffer);
+        UInt32 len = static_cast<UInt32>(packed_buffer_end - packed_buffer);
+        VarInt::writeVarUInt32(len, wb);
+        wb.write(reinterpret_cast<const char *>(packed_buffer), len);
+    }
+
+    write_bytes = wb.count() - write_bytes;
+    if (write_bytes > std::numeric_limits<UInt32>::max())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "write_bytes = {} > max uint32", write_bytes);
+}
+
+void PostingListInMemory::write(WriteBuffer & out, UInt32 * doc_delta_buffer, uint8_t * packed_buffer) const
+{
+    size_t write_bytes = out.count();
+    const UInt32 doc_count = size();
+    VarInt::writeVarUInt32(doc_count, out);
+    if (doc_count == 0)
+        return;
+
+    chassert(doc_delta_buffer);
+    chassert(packed_buffer);
+
+    UInt32 last_doc_id = 0;
+    UInt32 buffered = 0;
+    bool first = true;
+
+    auto flush = [&](bool final)
+    {
+        if (buffered == 0)
+            return;
+
+        uint8_t * end = final ? p4enc32(doc_delta_buffer, buffered, packed_buffer) : p4enc128v32(doc_delta_buffer, 128, packed_buffer);
+
+        const UInt32 len = static_cast<UInt32>(end - packed_buffer);
+        chassert(len <= 512);
+
+        VarInt::writeVarUInt32(len, out);
+        out.write(reinterpret_cast<const char *>(packed_buffer), len);
+
+        buffered = 0;
+    };
+
+    auto write_doc = [&](UInt32 doc_id)
+    {
+        if (first)
+        {
+            /// First doc id is written as-is
+            VarInt::writeVarUInt32(doc_id, out);
+            last_doc_id = doc_id;
+            first = false;
+            return;
+        }
+
+        if (doc_id <= last_doc_id)
+        {
+            if (doc_id == last_doc_id)
+                return;
+
+            throw Exception(ErrorCodes::INCORRECT_DATA, "Received out of order doc id. doc_id = {}, last_doc_id = {}", doc_id, last_doc_id);
+        }
+
+        doc_delta_buffer[buffered++] = doc_id - last_doc_id - 1;
+        last_doc_id = doc_id;
+
+        if (buffered == 128)
+            flush(false);
+    };
+
+    if (isBitmap())
+    {
+        for (UInt32 doc_id : m.bitmap)
+            write_doc(doc_id);
+    }
+    else
+    {
+        for (UInt32 doc_id : m.set)
+            write_doc(doc_id);
+    }
+
+    flush(true);
+    write_bytes = out.count() - write_bytes;
+    if (write_bytes > std::numeric_limits<UInt32>::max())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "write_bytes = {} > max uint32", write_bytes);
+}
+
+void PostingListInMemory::read(
+    ReadBuffer & in, UInt32 * doc_buffer, uint8_t * packed_buffer, const MergedPartOffsets * merged_part_offsets, size_t part_index)
+{
+    UInt32 left_count;
+    UInt32 last_doc_id;
+    VarInt::readVarUInt32(left_count, in);
+    VarInt::readVarUInt32(last_doc_id, in);
+
+    if (merged_part_offsets)
+        add(static_cast<UInt32>((*merged_part_offsets)[part_index, last_doc_id]));
+    else
+        add(last_doc_id);
+
+    --left_count;
+
+    while (left_count > 0)
+    {
+        UInt32 bytes;
+        VarInt::readVarUInt32(bytes, in);
+        UInt32 count = std::min(left_count, UInt32(128));
+        if (in.available() >= bytes)
+        {
+            uint8_t * packed_buffer_end = p4d1dec128v32(reinterpret_cast<uint8_t *>(in.position()), count, doc_buffer, last_doc_id);
+            in.position() = reinterpret_cast<char *>(packed_buffer_end);
+        }
+        else
+        {
+            chassert(bytes <= 512);
+            in.readStrict(reinterpret_cast<char *>(packed_buffer), bytes);
+            uint8_t * packed_buffer_end = p4d1dec128v32(packed_buffer, count, doc_buffer, last_doc_id);
+            chassert(packed_buffer_end - packed_buffer == bytes);
+        }
+
+        left_count -= count;
+        last_doc_id = doc_buffer[count - 1]; /// before offset re-mapping
+        if (merged_part_offsets)
+        {
+            for (UInt32 i = 0; i < count; ++i)
+                doc_buffer[i] = static_cast<UInt32>((*merged_part_offsets)[part_index, doc_buffer[i]]);
+        }
+        addMany(doc_buffer, count);
+    }
+}
+
+}

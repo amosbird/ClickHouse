@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Core/Field.h>
+#include <Core/SortDescription.h>
 #include <Storages/MergeTree/ProjectionIndex/IProjectionIndex.h>
 
 namespace DB
@@ -15,14 +16,11 @@ public:
 
     static ProjectionIndexPtr create(const ASTProjectionDeclaration & proj);
 
-    explicit ProjectionIndexText(ASTPtr index_ast_)
+    explicit ProjectionIndexText(ASTPtr index_ast_, String col_name_)
         : index_ast(std::move(index_ast_))
+        , col_name(std::move(col_name_))
     {
-    }
-
-    explicit ProjectionIndexText(std::shared_ptr<const MergeTreeIndexText> text_index_)
-        : text_index(std::move(text_index_))
-    {
+        sort_description.push_back(SortColumnDescription("term"));
     }
 
     String getName() const override { return name; }
@@ -39,6 +37,8 @@ public:
 
 private:
     ASTPtr index_ast;
+    String col_name;
+    SortDescription sort_description;
     std::shared_ptr<const MergeTreeIndexText> text_index;
 };
 

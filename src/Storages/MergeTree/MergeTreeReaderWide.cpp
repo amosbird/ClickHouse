@@ -10,6 +10,7 @@
 #include <Storages/MergeTree/DeserializationPrefixesCache.h>
 #include <Storages/MergeTree/IMergeTreeReader.h>
 #include <Storages/MergeTree/MergeTreeDataPartWide.h>
+#include <Storages/MergeTree/ProjectionIndex/ProjectionIndexDeserializationContext.h>
 #include <Storages/MergeTree/checkDataPart.h>
 #include <Common/escapeForFileName.h>
 #include <Common/typeid_cast.h>
@@ -566,6 +567,11 @@ void MergeTreeReaderWide::readData(
     };
 
     deserialize_settings.continuous_reading = continue_reading;
+
+    ProjectionIndexDeserializationContext projection_index_context{
+        data_part_info_for_read->getMergedPartOffsets(), data_part_info_for_read->getPartIndex(), 0, 0};
+    deserialize_settings.projection_index_context = &projection_index_context;
+
     auto & deserialize_state = deserialize_binary_bulk_state_map[name_and_type.name];
 
     serialization->deserializeBinaryBulkWithMultipleStreams(
