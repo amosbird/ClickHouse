@@ -4,6 +4,7 @@
 #include <DataTypes/DataTypeAggregateFunction.h>
 #include <DataTypes/DataTypeCustom.h>
 #include <DataTypes/DataTypeFactory.h>
+#include <Storages/MergeTree/MergeTreeDataPartWriterOnDisk.h>
 #include <Storages/MergeTree/ProjectionIndex/ProjectionIndexSerializationContext.h>
 #include <Common/Arena.h>
 
@@ -71,27 +72,6 @@ public:
     void serializeBinaryBulk(const IColumn &, WriteBuffer &, size_t, size_t) const override { throwNoSerialization(); }
     void deserializeBinaryBulk(IColumn &, ReadBuffer &, size_t, size_t, double) const override { throwNoSerialization(); }
 
-    /// TODO(amos): Introduce a dedicated state to represent large posting lists
-    /// stored in a separate index data stream.
-    ///
-    /// The stream is owned by the projection index and is independent of column
-    /// streams and part formats (compact or wide). It is written sequentially
-    /// in append-only mode, without marks or column-level compression.
-    ///
-    /// Dictionary blocks store offsets into this stream, which are used during
-    /// reads to seek directly to the corresponding posting lists, enabling
-    /// deferred and selective loading of large postings.
-    // void serializeBinaryBulkStatePrefix(
-    //     const IColumn & /*column*/, SerializeBinaryBulkSettings & /*settings*/, SerializeBinaryBulkStatePtr & /*state*/) const override;
-
-    /// TODO(amos): Evaluate whether this serialization should participate in enumerateStreams() to declare index-specific
-    /// side streams (e.g. the large posting list data stream), or whether such streams should be managed exclusively by the
-    /// projection index writer/reader.
-    ///
-    /// Note that these streams are not column substreams and are independent
-    /// of compact or wide part layouts.
-    // void enumerateStreams(EnumerateStreamsSettings & settings, const StreamCallback & callback, const SubstreamData & data) const override;
-
     void serializeBinaryBulkWithMultipleStreams(
         const IColumn & column,
         size_t offset,
@@ -99,10 +79,6 @@ public:
         SerializeBinaryBulkSettings & settings,
         SerializeBinaryBulkStatePtr & /* state */) const override
     {
-        /// TODO(amos): move this to state
-        alignas(16) UInt32 doc_buffer[128];
-        alignas(16) uint8_t packed_buffer[128 * 4];
-
         settings.path.push_back(Substream::Regular);
         if (WriteBuffer * stream = settings.getter(settings.path))
         {
@@ -114,6 +90,10 @@ public:
                 end = std::min(end, offset + limit);
 
             chassert(end > 0);
+            chassert(settings.projection_index_context && settings.projection_index_context->large_posting_getter);
+
+            auto * large_posting_stream = settings.projection_index_context->large_posting_getter(settings.path);
+            chassert(large_posting_stream);
 
             /// Invariant: posting list data in this range is homogeneous
             if (reinterpret_cast<const PostingListData *>(vec[0])->isWriter())
@@ -122,7 +102,18 @@ public:
                 {
                     const auto * posting_list_data = reinterpret_cast<const PostingListData *>(vec[i]);
                     chassert(posting_list_data->isWriter());
-                    posting_list_data->writer().finish(*stream, packed_buffer);
+                    posting_list_data->writer().finish(
+                        *stream, large_posting_stream->plain_hashing, large_posting_stream->packed_buffer, function->index_params);
+                }
+            }
+            else if (reinterpret_cast<const PostingListData *>(vec[0])->isStream())
+            {
+                /// TODO(amos):
+                for (size_t i = offset; i < end; ++i)
+                {
+                    const auto * posting_list_data = reinterpret_cast<const PostingListData *>(vec[i]);
+                    chassert(posting_list_data->isStream());
+                    posting_list_data->stream().write(*stream, *large_posting_stream, function->index_params);
                 }
             }
             else
@@ -130,20 +121,13 @@ public:
                 for (size_t i = offset; i < end; ++i)
                 {
                     const auto * posting_list_data = reinterpret_cast<const PostingListData *>(vec[i]);
-                    chassert(!posting_list_data->isWriter());
-                    posting_list_data->posting().write(*stream, doc_buffer, packed_buffer);
+                    chassert(posting_list_data->isPosting());
+                    posting_list_data->posting().write(*stream, large_posting_stream->doc_buffer, large_posting_stream->packed_buffer);
                 }
             }
         }
         settings.path.pop_back();
     }
-
-    /// TODO(amos): Initialize deserialization state with index-specific resources, such as handles to the large posting
-    /// list data stream.
-    // void deserializeBinaryBulkStatePrefix(
-    //     DeserializeBinaryBulkSettings & settings,
-    //     DeserializeBinaryBulkStatePtr & state,
-    //     SubstreamsDeserializeStatesCache * cache) const override;
 
     void deserializeBinaryBulkWithMultipleStreams(
         ColumnPtr & column,
@@ -153,10 +137,6 @@ public:
         DeserializeBinaryBulkStatePtr & /* state */,
         SubstreamsCache * cache) const override
     {
-        /// TODO(amos): move this to state
-        alignas(16) UInt32 doc_buffer[128];
-        alignas(16) uint8_t packed_buffer[128 * 4];
-
         settings.path.push_back(Substream::Regular);
 
         if (insertDataFromSubstreamsCacheIfAny(cache, settings, column))
@@ -189,6 +169,8 @@ public:
             size_t total_size_of_state = (size_of_state + align_of_state - 1) / align_of_state * align_of_state;
             char * place = arena.alignedAlloc(total_size_of_state * limit, align_of_state);
 
+            chassert(settings.projection_index_context);
+            auto large_posting_stream = settings.projection_index_context->large_posting_getter(settings.path);
             for (size_t i = 0; i < limit; ++i)
             {
                 if (stream->eof())
@@ -199,14 +181,14 @@ public:
                 try
                 {
                     auto & posting_list_data = reinterpret_cast<PostingListData &>(*place);
-                    chassert(!posting_list_data.isWriter());
-                    chassert(settings.projection_index_context);
-                    posting_list_data.posting().read(
+                    chassert(posting_list_data.isPosting());
+                    posting_list_data.toStreamUnsafe();
+                    posting_list_data.stream().read(
                         *stream,
-                        doc_buffer,
-                        packed_buffer,
+                        large_posting_stream,
                         settings.projection_index_context->merged_part_offsets,
-                        settings.projection_index_context->part_index);
+                        settings.projection_index_context->part_index,
+                        &arena);
                 }
                 catch (...)
                 {

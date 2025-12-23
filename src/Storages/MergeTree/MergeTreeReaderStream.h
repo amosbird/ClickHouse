@@ -52,6 +52,7 @@ public:
      */
     void adjustRightMark(size_t right_mark);
     ReadBuffer * getDataBuffer();
+    off_t getPosition();
 
 private:
     /// Returns offset in file up to which it's needed to read file to read all rows up to @right_mark mark.
@@ -119,6 +120,23 @@ public:
     std::pair<size_t, size_t> estimateMarkRangeBytes(const MarkRanges & mark_ranges) override;
     void seekToMark(size_t row_index) override;
 };
+
+struct LargePostingListReaderStream : public MergeTreeReaderStreamSingleColumnWholePart
+{
+    template <typename... Args>
+    explicit LargePostingListReaderStream(Args &&... args)
+        : MergeTreeReaderStreamSingleColumnWholePart{std::forward<Args>(args)...}
+    {
+    }
+
+    alignas(16) UInt32 doc_buffer[128];
+    alignas(16) uint8_t packed_buffer[128 * 4];
+};
+
+/// Shared ownership is required to support lazy materialization. The reader stream may be accessed after the original
+/// part reading phase, e.g. when posting lists are materialized while writing merged part. Using shared_ptr ensures the
+/// underlying buffers and read state remain valid.
+using LargePostingListReaderStreamPtr = std::shared_ptr<LargePostingListReaderStream>;
 
 /// Base class for reading from file that contains multiple columns.
 /// It is used to read from compact parts.

@@ -209,7 +209,7 @@ void MergeTreeDataPartWriterWide::addStreams(
         {
             large_posting_streams.emplace(
                 stream_name,
-                std::make_unique<MergeTreeWriterStream<true>>(
+                std::make_unique<LargePostingListWriterStream>(
                     stream_name,
                     data_part_storage,
                     stream_name,
@@ -544,10 +544,11 @@ void MergeTreeDataPartWriterWide::writeColumn(
     if (name_and_type.type->getName() == "PostingList")
     {
         ProjectionIndexSerializationContext projection_index_context;
-        projection_index_context.large_posting_getter = [&](const ISerialization::SubstreamPath & substream_path) -> WriteBuffer *
+        projection_index_context.large_posting_getter
+            = [&](const ISerialization::SubstreamPath & substream_path) -> LargePostingListWriterStream *
         {
             auto stream_name = getStreamName(name_and_type, substream_path);
-            return &large_posting_streams.at(stream_name)->plain_hashing;
+            return large_posting_streams.at(stream_name).get();
         };
         serialize_settings.projection_index_context = &projection_index_context;
     }

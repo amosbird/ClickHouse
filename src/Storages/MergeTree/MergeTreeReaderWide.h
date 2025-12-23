@@ -47,6 +47,7 @@ public:
 
 private:
     FileStreams streams;
+    std::unordered_map<String, LargePostingListReaderStreamPtr> large_posting_streams;
 
     void prefetchForAllColumns(
         Priority priority,

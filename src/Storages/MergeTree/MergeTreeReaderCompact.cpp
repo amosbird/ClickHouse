@@ -60,6 +60,40 @@ MergeTreeReaderCompact::MergeTreeReaderCompact(
     , deserialization_prefixes_cache(deserialization_prefixes_cache_)
 {
     marks_loader->startAsyncLoad();
+
+    try
+    {
+        for (auto & column : columns_to_read)
+        {
+            if (column.type->getName() == "PostingList")
+            {
+                auto stream_name = IMergeTreeDataPart::getStreamNameForColumn(
+                    column, {}, PROJECTION_INDEX_LARGE_POSTING_SUFFIX, data_part_info_for_read->getChecksums(), storage_settings);
+                chassert(stream_name);
+                static constexpr size_t marks_count = 1;
+                large_posting_streams.emplace(
+                    *stream_name,
+                    std::make_shared<LargePostingListReaderStream>(
+                        data_part_info_for_read->getDataPartStorage(),
+                        *stream_name,
+                        PROJECTION_INDEX_LARGE_POSTING_SUFFIX,
+                        marks_count,
+                        MarkRanges{{0, marks_count}},
+                        settings,
+                        /*uncompressed_cache=*/nullptr,
+                        data_part_info_for_read->getFileSizeOrZero(*stream_name + PROJECTION_INDEX_LARGE_POSTING_SUFFIX),
+                        /*marks_loader=*/nullptr,
+                        profile_callback,
+                        clock_type));
+            }
+        }
+    }
+    catch (...)
+    {
+        if (!isRetryableException(std::current_exception()))
+            data_part_info_for_read->reportBroken();
+        throw;
+    }
 }
 
 void MergeTreeReaderCompact::fillColumnPositions()
@@ -206,9 +240,25 @@ void MergeTreeReaderCompact::readData(
         deserialize_settings.use_specialized_prefixes_and_suffixes_substreams = true;
         deserialize_settings.data_part_type = MergeTreeDataPartType::Compact;
 
-        ProjectionIndexDeserializationContext projection_index_context{
-            data_part_info_for_read->getMergedPartOffsets(), data_part_info_for_read->getPartIndex(), 0, 0};
-        deserialize_settings.projection_index_context = &projection_index_context;
+        if (name_and_type.type->getName() == "PostingList")
+        {
+            ProjectionIndexDeserializationContext projection_index_context{
+                .large_posting_getter = [&](const ISerialization::SubstreamPath & substream_path) -> LargePostingListReaderStreamPtr
+                {
+                    auto stream_name = IMergeTreeDataPart::getStreamNameForColumn(
+                        name_and_type,
+                        substream_path,
+                        PROJECTION_INDEX_LARGE_POSTING_SUFFIX,
+                        data_part_info_for_read->getChecksums(),
+                        storage_settings);
+                    chassert(stream_name);
+                    return large_posting_streams.at(*stream_name);
+                },
+                .merged_part_offsets = data_part_info_for_read->getMergedPartOffsets(),
+                .part_index = data_part_info_for_read->getPartIndex(),
+            };
+            deserialize_settings.projection_index_context = &projection_index_context;
+        }
 
         deserialize_settings.get_avg_value_size_hint_callback
             = [&](const ISerialization::SubstreamPath & substream_path) -> double

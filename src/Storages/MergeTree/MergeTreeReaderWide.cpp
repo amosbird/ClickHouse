@@ -266,6 +266,26 @@ void MergeTreeReaderWide::addStreams(
         }
 
         addStream(substream_path, *stream_name);
+
+        if (name_and_type.type->getName() == "PostingList")
+        {
+            static constexpr size_t marks_count = 1;
+            large_posting_streams.emplace(
+                *stream_name,
+                std::make_shared<LargePostingListReaderStream>(
+                    data_part_info_for_read->getDataPartStorage(),
+                    *stream_name,
+                    PROJECTION_INDEX_LARGE_POSTING_SUFFIX,
+                    marks_count,
+                    MarkRanges{{0, marks_count}},
+                    settings,
+                    /*uncompressed_cache=*/nullptr,
+                    data_part_info_for_read->getFileSizeOrZero(*stream_name + PROJECTION_INDEX_LARGE_POSTING_SUFFIX),
+                    /*marks_loader=*/nullptr,
+                    profile_callback,
+                    clock_type));
+        }
+
         has_any_stream = true;
     };
 
@@ -568,9 +588,25 @@ void MergeTreeReaderWide::readData(
 
     deserialize_settings.continuous_reading = continue_reading;
 
-    ProjectionIndexDeserializationContext projection_index_context{
-        data_part_info_for_read->getMergedPartOffsets(), data_part_info_for_read->getPartIndex(), 0, 0};
-    deserialize_settings.projection_index_context = &projection_index_context;
+    if (name_and_type.type->getName() == "PostingList")
+    {
+        ProjectionIndexDeserializationContext projection_index_context{
+            .large_posting_getter = [&](const ISerialization::SubstreamPath & substream_path) -> LargePostingListReaderStreamPtr
+            {
+                auto stream_name = IMergeTreeDataPart::getStreamNameForColumn(
+                    name_and_type,
+                    substream_path,
+                    PROJECTION_INDEX_LARGE_POSTING_SUFFIX,
+                    data_part_info_for_read->getChecksums(),
+                    storage_settings);
+                chassert(stream_name);
+                return large_posting_streams.at(*stream_name);
+            },
+            .merged_part_offsets = data_part_info_for_read->getMergedPartOffsets(),
+            .part_index = data_part_info_for_read->getPartIndex(),
+        };
+        deserialize_settings.projection_index_context = &projection_index_context;
+    }
 
     auto & deserialize_state = deserialize_binary_bulk_state_map[name_and_type.name];
 

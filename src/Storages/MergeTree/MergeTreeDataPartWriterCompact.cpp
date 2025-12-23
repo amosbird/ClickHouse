@@ -99,9 +99,10 @@ void MergeTreeDataPartWriterCompact::addStreams(const NameAndTypePair & name_and
         compressed_streams.emplace(stream_name, stream);
         if (name_and_type.type->getName() == "PostingList")
         {
+            /// TODO(amos): Implement max_file_name_length and replace_long_file_name_to_hash for these separate streams.
             large_posting_streams.emplace(
                 stream_name,
-                std::make_unique<MergeTreeWriterStream<true>>(
+                std::make_unique<LargePostingListWriterStream>(
                     stream_name,
                     data_part_storage,
                     stream_name,
@@ -169,7 +170,7 @@ void writeColumnSingleGranule(
     const ColumnWithTypeAndName & column,
     const SerializationPtr & serialization,
     ISerialization::OutputStreamGetter stream_getter,
-    ISerialization::OutputStreamGetter large_posting_getter,
+    LargePostingListWriterStreamGetter large_posting_getter,
     ISerialization::StreamMarkGetter stream_mark_getter,
     size_t from_row,
     size_t number_of_rows,
@@ -329,10 +330,10 @@ void MergeTreeDataPartWriterCompact::writeDataBlock(const Block & block, const G
                 return {plain_hashing.count(), compressed_streams[stream_name]->hashing_buf.offset()};
             };
 
-            ISerialization::OutputStreamGetter large_posting_getter;
+            LargePostingListWriterStreamGetter large_posting_getter;
             if (name_and_type->type->getName() == "PostingList")
             {
-                large_posting_getter = [&, this](const ISerialization::SubstreamPath & substream_path) -> WriteBuffer *
+                large_posting_getter = [&, this](const ISerialization::SubstreamPath & substream_path) -> LargePostingListWriterStream *
                 {
                     String stream_name = ISerialization::getFileNameForStream(
                         *name_and_type, substream_path, ISerialization::StreamFileNameSettings(*storage_settings));
@@ -344,7 +345,7 @@ void MergeTreeDataPartWriterCompact::writeDataBlock(const Block & block, const G
                             ErrorCodes::LOGICAL_ERROR, "Large posting stream {} for column {} not found", stream_name, name_and_type->name);
                     }
 
-                    return &stream_it->second->plain_hashing;
+                    return stream_it->second.get();
                 };
             }
 
