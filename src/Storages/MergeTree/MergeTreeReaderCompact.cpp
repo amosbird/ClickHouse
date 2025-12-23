@@ -60,42 +60,6 @@ MergeTreeReaderCompact::MergeTreeReaderCompact(
     , deserialization_prefixes_cache(deserialization_prefixes_cache_)
 {
     marks_loader->startAsyncLoad();
-
-    try
-    {
-        for (auto & column : columns_to_read)
-        {
-            if (column.type->getName() == "PostingList")
-            {
-                auto stream_name = IMergeTreeDataPart::getStreamNameForColumn(
-                    column, {}, PROJECTION_INDEX_LARGE_POSTING_SUFFIX, data_part_info_for_read->getChecksums(), storage_settings);
-                chassert(stream_name);
-                static constexpr size_t marks_count = 1;
-                auto large_posting_stream_settings = settings;
-                large_posting_stream_settings.is_compressed = false;
-                large_posting_streams.emplace(
-                    *stream_name,
-                    std::make_shared<LargePostingListReaderStream>(
-                        data_part_info_for_read->getDataPartStorage(),
-                        *stream_name,
-                        PROJECTION_INDEX_LARGE_POSTING_SUFFIX,
-                        marks_count,
-                        MarkRanges{{0, marks_count}},
-                        large_posting_stream_settings,
-                        /*uncompressed_cache=*/nullptr,
-                        data_part_info_for_read->getFileSizeOrZero(*stream_name + PROJECTION_INDEX_LARGE_POSTING_SUFFIX),
-                        /*marks_loader=*/nullptr,
-                        profile_callback,
-                        clock_type));
-            }
-        }
-    }
-    catch (...)
-    {
-        if (!isRetryableException(std::current_exception()))
-            data_part_info_for_read->reportBroken();
-        throw;
-    }
 }
 
 void MergeTreeReaderCompact::fillColumnPositions()
