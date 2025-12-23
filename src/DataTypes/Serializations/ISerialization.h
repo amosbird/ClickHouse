@@ -48,6 +48,7 @@ struct NameAndTypePair;
 
 struct MergeTreeSettings;
 
+struct ProjectionIndexSerializationContext;
 struct ProjectionIndexDeserializationContext;
 
 /** Represents serialization of data type.
@@ -397,6 +398,10 @@ public:
         /// Type of MergeTree data part we serialize data from if any.
         /// Some serializations may differ from type part for more optimal deserialization.
         MergeTreeDataPartType data_part_type = MergeTreeDataPartType::Unknown;
+
+        /// Optional context for projection index–driven serialization. Provides query- and index-specific information
+        /// required during serialization, such as additional streams for large postings and part–level metadata.
+        const ProjectionIndexSerializationContext * projection_index_context = nullptr;
     };
 
     struct DeserializeBinaryBulkSettings
@@ -454,8 +459,7 @@ public:
         bool insert_only_rows_in_current_range_from_substreams_cache = false;
 
         /// Optional context for projection index driven deserialization. Contains query- and index-specific information
-        /// (e.g. row id remapping, row range limits) that affects how data is deserialized and filtered. If nullptr,
-        /// deserialization proceeds in the default (non-index) mode.
+        /// (e.g. row id remapping, row range limits) that affects how data is deserialized and filtered.
         const ProjectionIndexDeserializationContext * projection_index_context = nullptr;
     };
 

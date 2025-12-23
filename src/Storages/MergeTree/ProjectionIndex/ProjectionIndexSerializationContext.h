@@ -15,4 +15,12 @@ struct ProjectionIndexDeserializationContext
     UInt64 row_end = 0;
 };
 
+struct ProjectionIndexSerializationContext
+{
+    const MergedPartOffsets * merged_part_offsets = nullptr;
+    UInt64 part_index = 0;
+    UInt64 row_start = 0;
+    UInt64 row_end = 0;
+};
+
 }

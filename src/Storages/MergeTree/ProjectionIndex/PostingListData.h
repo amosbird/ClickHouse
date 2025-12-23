@@ -477,68 +477,24 @@ struct alignas(8) PostingListInMemory
     }
 
     void write(WriteBuffer & out, UInt32 * doc_delta_buffer, uint8_t * packed_buffer) const;
-    // {
-    //     if (m.set.type == 0)
-    //     {
-    //         /// PostingListSet
-    //         writeBinary(UInt8(0), out);
-    //         writeBinary(m.set.m_size, out);
-    //         out.write(reinterpret_cast<const char *>(m.set.container), m.set.m_size * sizeof(UInt32));
-    //     }
-    //     else
-    //     {
-    //         /// PostingListBitmap
-    //         writeBinary(UInt8(1), out);
-    //         size_t num_bytes = roaring::api::roaring_bitmap_portable_size_in_bytes(&m.bitmap.roaring);
-    //         writeVarUInt(num_bytes, out);
-
-    //         std::vector<char> memory(num_bytes);
-    //         roaring::api::roaring_bitmap_portable_serialize(&m.bitmap.roaring, memory.data());
-    //         out.write(memory.data(), num_bytes);
-    //     }
-    // }
 
     void
     read(ReadBuffer & in, UInt32 * doc_buffer, uint8_t * packed_buffer, const MergedPartOffsets * merged_part_offsets, size_t part_index);
-    // {
-    //     this->~PostingListInMemory();
-
-    //     UInt8 kind = 0;
-    //     readBinary(kind, in);
-
-    //     if (kind == 0)
-    //     {
-    //         /// PostingListSet
-    //         new (&m.set) PostingListSet();
-    //         readBinary(m.set.m_size, in);
-    //         chassert(m.set.m_size <= 8);
-    //         in.readStrict(reinterpret_cast<char *>(m.set.container), m.set.m_size * sizeof(UInt32));
-    //         m.set.type = 0;
-    //     }
-    //     else
-    //     {
-    //         /// PostingListBitmap
-
-    //         size_t num_bytes;
-    //         readVarUInt(num_bytes, in);
-
-    //         /// If the posting list is completely in the buffer, avoid copying.
-    //         if (in.position() && in.position() + num_bytes <= in.buffer().end())
-    //         {
-    //             new (&m.bitmap) PostingListBitmap(PostingListBitmap::read(in.position()));
-    //             in.ignore(num_bytes);
-    //         }
-    //         else
-    //         {
-    //             std::vector<char> buf(num_bytes);
-    //             in.readStrict(buf.data(), num_bytes);
-    //             new (&m.bitmap) PostingListBitmap(PostingListBitmap::read(buf.data()));
-    //         }
-    //     }
-    // }
 };
 
 static_assert(sizeof(PostingListInMemory) == 40, "PostingListInMemory must be 40 bytes");
+
+struct RowsRange;
+
+struct alignas(8) PostingListReader
+{
+    Int32 type = -2;
+    UInt32 doc_count = 0;
+
+    UInt64 * offsets = nullptr;
+    RowsRange * ranges = nullptr;
+    PostingListInMemory * embedded_postings = nullptr;
+};
 
 struct PostingListData
 {

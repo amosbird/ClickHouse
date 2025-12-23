@@ -403,6 +403,9 @@ public:
     /// 3. The preprocessor argument is a generic expression, e.g. lower(extractTextFromHTML(col))
     static FieldVector parseArgumentsListFromAST(const ASTPtr & arguments);
 
+    static std::pair<MergeTreeIndexTextParams, std::unique_ptr<ITokenExtractor>>
+    parseTextIndexArguments(const String & index_name, const FieldVector & index_arguments);
+
     MergeTreeIndexTextParams params;
     std::unique_ptr<ITokenExtractor> token_extractor;
     MergeTreeIndexTextPreprocessorPtr preprocessor;

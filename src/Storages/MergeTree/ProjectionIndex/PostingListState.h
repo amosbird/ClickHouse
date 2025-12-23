@@ -3,18 +3,22 @@
 #include <AggregateFunctions/IAggregateFunction.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypesNumber.h>
+#include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/ProjectionIndex/PostingListData.h>
 
 namespace DB
 {
+
+MergeTreeIndexPtr textIndexCreator(const IndexDescription & index);
 
 class AggregateFunctionPostingList final : public IAggregateFunctionDataHelper<PostingListData, AggregateFunctionPostingList>
 {
     using Data = PostingListData;
 
 public:
-    explicit AggregateFunctionPostingList()
-        : IAggregateFunctionDataHelper<PostingListData, AggregateFunctionPostingList>({}, {}, createResultType())
+    explicit AggregateFunctionPostingList(const Array & params, const MergeTreeIndexTextParams & index_params_)
+        : IAggregateFunctionDataHelper<PostingListData, AggregateFunctionPostingList>({}, params, createResultType())
+        , index_params(index_params_)
     {
     }
 
@@ -66,6 +70,15 @@ public:
     }
 
     bool allocatesMemoryInArena() const override { return false; }
+
+    /// Build index parameters from data type arguments. This path is only valid when the type is created via
+    /// getPostingListType() and is used exclusively for metadata, not for the columns.txt persisted in data parts.
+    ///
+    /// This is safe because these parameters are only needed when creating new data parts (during INSERT or MERGE),
+    /// where metadata is used as the source of truth.
+    MergeTreeIndexTextParams index_params;
 };
+
+DataTypePtr getPostingListType(const ASTPtr & arguments);
 
 }

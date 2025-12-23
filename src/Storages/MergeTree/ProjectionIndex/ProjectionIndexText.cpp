@@ -48,8 +48,6 @@ ProjectionIndexPtr ProjectionIndexText::create(const ASTProjectionDeclaration & 
 void ProjectionIndexText::fillProjectionDescription(
     ProjectionDescription & result, const IAST * /* index_expr */, const ColumnsDescription & columns, ContextPtr query_context) const
 {
-    // result.index = std::make_shared<ProjectionIndexText>(std::static_pointer_cast<const MergeTreeIndexText>(
-    //     textIndexCreator(IndexDescription::getIndexFromAST(index_ast, columns, /* is_implicitly_created */ true, query_context))));
     chassert(result.index.get() == this);
     chassert(!text_index);
     if (!columns.has(col_name))
@@ -77,7 +75,7 @@ void ProjectionIndexText::fillProjectionDescription(
 
     result.type = ProjectionDescription::Type::Aggregate;
     result.sample_block_for_keys.insert({ColumnString::create(), std::make_shared<DataTypeString>(), "term"});
-    auto posting_list_type = DataTypeFactory::instance().get("PostingList");
+    auto posting_list_type = getPostingListType(index_ast->as<ASTIndexDeclaration>()->getType()->arguments);
     result.sample_block
         = {result.sample_block_for_keys.getByPosition(0), {posting_list_type->createColumn(), posting_list_type, "posting_list"}};
 

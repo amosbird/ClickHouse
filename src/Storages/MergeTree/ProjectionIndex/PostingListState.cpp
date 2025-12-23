@@ -1,9 +1,9 @@
-#include <DataTypes/DataTypeFactory.h>
 #include <Storages/MergeTree/ProjectionIndex/PostingListState.h>
 
 #include <Columns/ColumnAggregateFunction.h>
 #include <DataTypes/DataTypeAggregateFunction.h>
 #include <DataTypes/DataTypeCustom.h>
+#include <DataTypes/DataTypeFactory.h>
 #include <Storages/MergeTree/ProjectionIndex/ProjectionIndexDeserializationContext.h>
 #include <Common/Arena.h>
 
@@ -44,9 +44,14 @@ public:
 class SerializationPostingList final : public SimpleTextSerialization
 {
 private:
-    AggregateFunctionPostingList function;
+    std::shared_ptr<AggregateFunctionPostingList> function;
 
 public:
+    explicit SerializationPostingList(std::shared_ptr<AggregateFunctionPostingList> function_)
+        : function(function_)
+    {
+    }
+
     [[noreturn]] static void throwNoSerialization()
     {
         throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Serialization is not implemented for type PostingList");
@@ -172,8 +177,8 @@ public:
             Arena & arena = real_column.createOrGetArena();
             vec.reserve(vec.size() + limit);
 
-            size_t size_of_state = function.sizeOfData();
-            size_t align_of_state = function.alignOfData();
+            size_t size_of_state = function->sizeOfData();
+            size_t align_of_state = function->alignOfData();
 
             /// Adjust the size of state to make all states aligned in vector.
             size_t total_size_of_state = (size_of_state + align_of_state - 1) / align_of_state * align_of_state;
@@ -200,7 +205,7 @@ public:
                 }
                 catch (...)
                 {
-                    function.destroy(place);
+                    function->destroy(place);
                     throw;
                 }
 
@@ -216,25 +221,27 @@ public:
     }
 };
 
-DataTypePtr getPostingListType()
+DataTypePtr getPostingListType(const ASTPtr & arguments)
 {
-    DataTypePtr posting_list_type
-        = std::make_shared<DataTypeAggregateFunction>(std::make_shared<AggregateFunctionPostingList>(), DataTypes{}, Array{});
-    posting_list_type->setCustomization(
-        std::make_unique<DataTypeCustomDesc>(std::make_unique<DataTypePostingList>(), std::make_shared<SerializationPostingList>()));
-    return posting_list_type;
-}
+    Array params;
+    MergeTreeIndexTextParams index_params;
+    if (arguments && !arguments->children.empty())
+    {
+        auto index_arguments = MergeTreeIndexText::parseArgumentsListFromAST(arguments);
+        params.assign_range(index_arguments);
+        index_params = MergeTreeIndexText::parseTextIndexArguments("PostingList", index_arguments).first;
+    }
 
-static std::pair<DataTypePtr, DataTypeCustomDescPtr> create(const ASTPtr & /* arguments */)
-{
-    return {
-        std::make_shared<DataTypeAggregateFunction>(std::make_shared<AggregateFunctionPostingList>(), DataTypes{}, Array{}),
-        std::make_unique<DataTypeCustomDesc>(std::make_unique<DataTypePostingList>(), std::make_shared<SerializationPostingList>())};
+    auto function = std::make_shared<AggregateFunctionPostingList>(params, index_params);
+    auto type = std::make_shared<DataTypeAggregateFunction>(function, DataTypes{}, params);
+    type->setCustomization(std::make_unique<DataTypeCustomDesc>(
+        std::make_unique<DataTypePostingList>(), std::make_shared<SerializationPostingList>(function)));
+    return type;
 }
 
 void registerDataTypePostingList(DataTypeFactory & factory)
 {
-    factory.registerDataTypeCustom("PostingList", create);
+    factory.registerDataType("PostingList", getPostingListType);
 }
 
 }
