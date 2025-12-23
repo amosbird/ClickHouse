@@ -1,6 +1,7 @@
 #include <Compression/CompressionFactory.h>
 #include <Storages/MergeTree/MergeTreeDataPartWriterCompact.h>
 #include <Storages/MergeTree/MergeTreeDataPartCompact.h>
+#include <Storages/MergeTree/ProjectionIndex/ProjectionIndexSerializationContext.h>
 #include <Storages/StorageInMemoryMetadata.h>
 #include <Formats/MarkInCompressedFile.h>
 #include <IO/NullWriteBuffer.h>
@@ -96,6 +97,19 @@ void MergeTreeDataPartWriterCompact::addStreams(const NameAndTypePair & name_and
             stream = std::make_shared<CompressedStream>(plain_hashing, compression_codec);
 
         compressed_streams.emplace(stream_name, stream);
+        if (name_and_type.type->getName() == "PostingList")
+        {
+            large_posting_streams.emplace(
+                stream_name,
+                std::make_unique<MergeTreeWriterStream<true>>(
+                    stream_name,
+                    data_part_storage,
+                    stream_name,
+                    PROJECTION_INDEX_LARGE_POSTING_SUFFIX,
+                    compression_codec,
+                    settings.max_compress_block_size,
+                    settings.query_write_settings));
+        }
     };
 
     ISerialization::EnumerateStreamsSettings enumerate_settings;
@@ -155,6 +169,7 @@ void writeColumnSingleGranule(
     const ColumnWithTypeAndName & column,
     const SerializationPtr & serialization,
     ISerialization::OutputStreamGetter stream_getter,
+    ISerialization::OutputStreamGetter large_posting_getter,
     ISerialization::StreamMarkGetter stream_mark_getter,
     size_t from_row,
     size_t number_of_rows,
@@ -181,6 +196,12 @@ void writeColumnSingleGranule(
         serialize_settings.object_and_dynamic_write_statistics = ISerialization::SerializeBinaryBulkSettings::ObjectAndDynamicStatisticsMode::PREFIX_EMPTY;
     serialize_settings.use_specialized_prefixes_and_suffixes_substreams = true;
     serialize_settings.data_part_type = MergeTreeDataPartType::Compact;
+
+    if (large_posting_getter)
+    {
+        ProjectionIndexSerializationContext projection_index_context{large_posting_getter};
+        serialize_settings.projection_index_context = &projection_index_context;
+    }
 
     serialization->serializeBinaryBulkStatePrefix(*column.column, serialize_settings, state);
     serialization->serializeBinaryBulkWithMultipleStreams(*column.column, from_row, number_of_rows, serialize_settings, state);
@@ -308,9 +329,35 @@ void MergeTreeDataPartWriterCompact::writeDataBlock(const Block & block, const G
                 return {plain_hashing.count(), compressed_streams[stream_name]->hashing_buf.offset()};
             };
 
+            ISerialization::OutputStreamGetter large_posting_getter;
+            if (name_and_type->type->getName() == "PostingList")
+            {
+                large_posting_getter = [&, this](const ISerialization::SubstreamPath & substream_path) -> WriteBuffer *
+                {
+                    String stream_name = ISerialization::getFileNameForStream(
+                        *name_and_type, substream_path, ISerialization::StreamFileNameSettings(*storage_settings));
+
+                    auto stream_it = large_posting_streams.find(stream_name);
+                    if (stream_it == large_posting_streams.end())
+                    {
+                        throw Exception(
+                            ErrorCodes::LOGICAL_ERROR, "Large posting stream {} for column {} not found", stream_name, name_and_type->name);
+                    }
+
+                    return &stream_it->second->plain_hashing;
+                };
+            }
+
             writeColumnSingleGranule(
-                block.getByName(name_and_type->name), getSerialization(name_and_type->name),
-                stream_getter, stream_mark_getter, granule.start_row, granule.rows_to_write, !data_written, settings);
+                block.getByName(name_and_type->name),
+                getSerialization(name_and_type->name),
+                stream_getter,
+                large_posting_getter,
+                stream_mark_getter,
+                granule.start_row,
+                granule.rows_to_write,
+                !data_written,
+                settings);
 
             /// Each type always have at least one substream
             prev_stream->hashing_buf.next();
@@ -408,7 +455,7 @@ void MergeTreeDataPartWriterCompact::initColumnsSubstreamsIfNeeded(const Block &
 
         auto mark_getter = [](const ISerialization::SubstreamPath &) { return MarkInCompressedFile(); };
         const auto & column = sample.getByName(name_and_type.name);
-        writeColumnSingleGranule(column, getSerialization(name_and_type.name), buffer_getter, mark_getter, column.column->size(), 0, false, settings);
+        writeColumnSingleGranule(column, getSerialization(name_and_type.name), buffer_getter, {}, mark_getter, column.column->size(), 0, false, settings);
     }
 }
 
@@ -541,6 +588,7 @@ void MergeTreeDataPartWriterCompact::fillChecksums(MergeTreeDataPartChecksums & 
 
     fillSkipIndicesChecksums(checksums);
     fillStatisticsChecksums(checksums);
+    fillLargePostingChecksums(checksums);
 }
 
 void MergeTreeDataPartWriterCompact::finish(bool sync)
@@ -554,6 +602,7 @@ void MergeTreeDataPartWriterCompact::finish(bool sync)
 
     finishSkipIndicesSerialization(sync);
     finishStatisticsSerialization(sync);
+    finishLargePostingSerialization(sync);
 }
 
 void MergeTreeDataPartWriterCompact::cancel() noexcept

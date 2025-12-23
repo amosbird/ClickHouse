@@ -47,6 +47,7 @@ public:
 
     using StreamPtr = std::unique_ptr<MergeTreeWriterStream<false>>;
     using StatisticStreamPtr = std::unique_ptr<MergeTreeWriterStream<true>>;
+    using LargePostingListStreamPtr = std::unique_ptr<MergeTreeWriterStream<true>>;
 
     MergeTreeDataPartWriterOnDisk(
         const String & data_part_name_,
@@ -98,6 +99,9 @@ protected:
     void fillStatisticsChecksums(MergeTreeDataPartChecksums & checksums);
     void finishStatisticsSerialization(bool sync);
 
+    void fillLargePostingChecksums(MergeTreeDataPartChecksums & checksums);
+    void finishLargePostingSerialization(bool sync);
+
     /// Get global number of the current which we are writing (or going to start to write)
     size_t getCurrentMark() const { return current_mark; }
 
@@ -118,6 +122,8 @@ protected:
 
     const ColumnsStatistics stats;
     std::vector<StatisticStreamPtr> stats_streams;
+
+    std::unordered_map<String, LargePostingListStreamPtr> large_posting_streams;
 
     const String marks_file_extension;
     const CompressionCodecPtr default_codec;

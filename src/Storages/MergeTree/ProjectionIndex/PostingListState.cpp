@@ -4,7 +4,7 @@
 #include <DataTypes/DataTypeAggregateFunction.h>
 #include <DataTypes/DataTypeCustom.h>
 #include <DataTypes/DataTypeFactory.h>
-#include <Storages/MergeTree/ProjectionIndex/ProjectionIndexDeserializationContext.h>
+#include <Storages/MergeTree/ProjectionIndex/ProjectionIndexSerializationContext.h>
 #include <Common/Arena.h>
 
 namespace DB
@@ -30,6 +30,11 @@ void AggregateFunctionPostingList::deserialize(AggregateDataPtr, ReadBuffer &, s
 }
 
 
+/// TODO(amos): This needs to be exposed to the data type system. During data part loading, columns are instantiated via
+/// DataTypeFactory::instance().get(), so we need a way to represent this as a regular data type.
+///
+/// This is currently safe because there is no supported way to manually generate data of this type. If we need to
+/// implement it, also check for replications and mutations
 class DataTypePostingList : public IDataTypeCustomName
 {
 public:

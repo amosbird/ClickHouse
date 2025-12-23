@@ -122,6 +122,7 @@ struct MergeTreeWriterSettings
     bool use_adaptive_write_buffer_for_dynamic_subcolumns;
     size_t min_columns_to_activate_adaptive_write_buffer;
     size_t adaptive_write_buffer_initial_size;
+    bool enable_large_postings_stream_for_projection_text_index = false;
 };
 
 }
