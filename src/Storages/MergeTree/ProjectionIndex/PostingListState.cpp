@@ -79,6 +79,12 @@ public:
         SerializeBinaryBulkSettings & settings,
         SerializeBinaryBulkStatePtr & /* state */) const override
     {
+        /// Some code paths (e.g. MergeTreeDataPartWriterCompact::initColumnsSubstreamsIfNeeded) use NullWriteBuffer
+        /// only to enumerate substreams for initialization purposes. This is unrelated to posting list writing and can
+        /// be safely ignored here.
+        if (!settings.projection_index_context)
+            return;
+
         settings.path.push_back(Substream::Regular);
         if (WriteBuffer * stream = settings.getter(settings.path))
         {
@@ -181,8 +187,7 @@ public:
                 try
                 {
                     auto & posting_list_data = reinterpret_cast<PostingListData &>(*place);
-                    chassert(posting_list_data.isPosting());
-                    posting_list_data.toStreamUnsafe();
+                    chassert(posting_list_data.isStream());
                     posting_list_data.stream().read(
                         *stream,
                         large_posting_stream,

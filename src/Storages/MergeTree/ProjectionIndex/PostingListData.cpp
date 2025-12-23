@@ -521,16 +521,20 @@ void PostingListStream::read(
 
     /// Eager reading
     {
+        UInt32 num_large_blocks;
+        VarInt::readVarUInt32(num_large_blocks, in);
+
+        chassert(num_large_blocks >= 1);
+
+        UInt32 dummy_id;
+        VarInt::readVarUInt32(dummy_id, in);
         UInt64 large_posting_offset;
         readVarUInt(large_posting_offset, in);
         chassert(static_cast<long>(large_posting_offset) == stream->getPosition());
 
         /// Skip metadata of large posting blocks
-        UInt32 num_large_blocks;
-        VarInt::readVarUInt32(num_large_blocks, in);
-        for (UInt32 i = 0; i < num_large_blocks; ++i)
+        for (UInt32 i = 1; i < num_large_blocks; ++i)
         {
-            UInt32 dummy_id;
             UInt64 dummy_offset;
             VarInt::readVarUInt32(dummy_id, in);
             readVarUInt(dummy_offset, in);
@@ -623,7 +627,6 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
         chassert(embedded_postings);
 
         UInt32 buffered = 0;
-
         auto emit = [&](UInt32 doc_id)
         {
             if (first)
@@ -655,21 +658,19 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     /// TODO(amos): lazy
     chassert(embedded_postings);
 
+    /// Align to 128-doc blocks
+    const UInt32 docs_per_large_block = (index_params.posting_list_block_size + 127) & ~127;
+    const UInt32 large_doc_count = doc_count - 1;
+    const UInt32 num_large_blocks = (large_doc_count + docs_per_large_block - 1) / docs_per_large_block;
+
     /// Write first doc inline
     auto write_first_doc = [&](UInt32 doc_id)
     {
         VarInt::writeVarUInt32(doc_id, wb);
+        VarInt::writeVarUInt32(num_large_blocks, wb);
         last_doc_id = doc_id;
         first = false;
     };
-
-    /// Align to 128-doc blocks
-    const UInt32 docs_per_large_block = (index_params.posting_list_block_size + 127) & ~127;
-
-    const UInt32 large_doc_count = doc_count - 1;
-    const UInt32 num_large_blocks = (large_doc_count + docs_per_large_block - 1) / docs_per_large_block;
-
-    VarInt::writeVarUInt32(num_large_blocks, wb);
 
     LargePostingBlockWriter block_writer(wb, stream.plain_hashing, docs_per_large_block);
 

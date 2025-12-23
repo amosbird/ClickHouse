@@ -648,6 +648,7 @@ struct alignas(8) PostingListStream
     PostingListBitmap * embedded_postings = nullptr;
     LazyPostingStream * lazy_posting_stream = nullptr;
 
+    PostingListStream() = default;
     PostingListStream(const PostingListStream &) = delete;
     PostingListStream & operator=(const PostingListStream &) = delete;
 
@@ -713,9 +714,9 @@ struct PostingListData
     } storage;
 
     /// Zero initialized
-    PostingListData() { new (&storage.posting) PostingListInMemory(); }
+    PostingListData() { new (&storage.stream) PostingListStream(); }
 
-    explicit PostingListData(bool /* is_merge */) { new (&storage.posting) PostingListInMemory(); }
+    explicit PostingListData(bool /* is_merge */) { new (&storage.stream) PostingListStream(); }
 
     PostingListData(const PostingListData & other) = delete;
     PostingListData & operator=(const PostingListData & other) = delete;

@@ -28,15 +28,27 @@ public:
 
     void add(AggregateDataPtr, const IColumn **, size_t, Arena *) const override;
 
-    /// TODO(amos): should we use arena to allocate memory inside roaring?
-    /// TODO(amos): we should also use this to merge streams
-    void merge(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena * /* arena */) const override
+    void merge(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena * arena) const override
     {
         auto & lhs_posting_list_data = data(place);
         const auto & rhs_posting_list_data = data(rhs);
-        chassert(!lhs_posting_list_data.isWriter());
-        chassert(!rhs_posting_list_data.isWriter());
-        lhs_posting_list_data.posting().merge(rhs_posting_list_data.posting());
+        chassert(lhs_posting_list_data.isStream());
+        chassert(rhs_posting_list_data.isStream());
+        if (rhs_posting_list_data.stream().doc_count == 0)
+            return;
+
+        if (lhs_posting_list_data.stream().doc_count == 0)
+        {
+            auto * bitmap = arena->alignedAlloc(sizeof(PostingListBitmap), alignof(PostingListBitmap));
+            new (bitmap) PostingListBitmap();
+            lhs_posting_list_data.stream().embedded_postings = reinterpret_cast<PostingListBitmap *>(bitmap);
+        }
+
+        chassert(lhs_posting_list_data.stream().embedded_postings);
+        chassert(rhs_posting_list_data.stream().embedded_postings);
+
+        *lhs_posting_list_data.stream().embedded_postings |= *rhs_posting_list_data.stream().embedded_postings;
+        lhs_posting_list_data.stream().doc_count = lhs_posting_list_data.stream().embedded_postings->cardinality();
     }
 
     void serialize(ConstAggregateDataPtr, WriteBuffer &, std::optional<size_t>) const override;
@@ -48,28 +60,49 @@ public:
         ColumnArray & arr_to = assert_cast<ColumnArray &>(to);
         ColumnArray::Offsets & offsets_to = arr_to.getOffsets();
         const auto & posting_list_data = data(place);
-        chassert(!posting_list_data.isWriter());
-        const auto & posting_list = posting_list_data.posting();
-        if (posting_list.isBitmap())
+        if (posting_list_data.isPosting())
         {
-            size_t num_docs = posting_list.m.bitmap.cardinality();
-            offsets_to.push_back(offsets_to.back() + num_docs);
+            const auto & posting_list = posting_list_data.posting();
+            if (posting_list.isBitmap())
+            {
+                size_t num_docs = posting_list.m.bitmap.cardinality();
+                offsets_to.push_back(offsets_to.back() + num_docs);
+                typename ColumnVector<UInt32>::Container & data_to = assert_cast<ColumnVector<UInt32> &>(arr_to.getData()).getData();
+                size_t pos = data_to.size();
+                data_to.resize(data_to.size() + num_docs);
+                for (UInt32 doc : posting_list.m.bitmap)
+                    data_to[pos++] = doc;
+            }
+            else
+            {
+                size_t num_docs = posting_list.m.set.m_size;
+                offsets_to.push_back(offsets_to.back() + num_docs);
+                typename ColumnVector<UInt32>::Container & data_to = assert_cast<ColumnVector<UInt32> &>(arr_to.getData()).getData();
+                data_to.insert(posting_list.m.set.begin(), posting_list.m.set.end());
+            }
+        }
+        else if (posting_list_data.isStream())
+        {
+            const auto & posting_list = posting_list_data.stream();
+            if (posting_list.doc_count == 0)
+                return;
+
+            chassert(posting_list.embedded_postings);
+
+            offsets_to.push_back(offsets_to.back() + posting_list.doc_count);
             typename ColumnVector<UInt32>::Container & data_to = assert_cast<ColumnVector<UInt32> &>(arr_to.getData()).getData();
             size_t pos = data_to.size();
-            data_to.resize(data_to.size() + num_docs);
-            for (UInt32 doc : posting_list.m.bitmap)
+            data_to.resize(data_to.size() + posting_list.doc_count);
+            for (UInt32 doc : *posting_list.embedded_postings)
                 data_to[pos++] = doc;
         }
         else
         {
-            size_t num_docs = posting_list.m.set.m_size;
-            offsets_to.push_back(offsets_to.back() + num_docs);
-            typename ColumnVector<UInt32>::Container & data_to = assert_cast<ColumnVector<UInt32> &>(arr_to.getData()).getData();
-            data_to.insert(posting_list.m.set.begin(), posting_list.m.set.end());
+            chassert(false);
         }
     }
 
-    bool allocatesMemoryInArena() const override { return false; }
+    bool allocatesMemoryInArena() const override { return true; }
 
     /// Build index parameters from data type arguments. This path is only valid when the type is created via
     /// getPostingListType() and is used exclusively for metadata, not for the columns.txt persisted in data parts.

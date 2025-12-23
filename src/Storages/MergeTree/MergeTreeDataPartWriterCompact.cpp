@@ -198,9 +198,10 @@ void writeColumnSingleGranule(
     serialize_settings.use_specialized_prefixes_and_suffixes_substreams = true;
     serialize_settings.data_part_type = MergeTreeDataPartType::Compact;
 
+    ProjectionIndexSerializationContext projection_index_context;
     if (large_posting_getter)
     {
-        ProjectionIndexSerializationContext projection_index_context{large_posting_getter};
+        projection_index_context.large_posting_getter = large_posting_getter;
         serialize_settings.projection_index_context = &projection_index_context;
     }
 

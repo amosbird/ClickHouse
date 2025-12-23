@@ -541,9 +541,9 @@ void MergeTreeDataPartWriterWide::writeColumn(
         return {stream->plain_hashing.count(), stream->compressed_hashing.offset()};
     };
 
+    ProjectionIndexSerializationContext projection_index_context;
     if (name_and_type.type->getName() == "PostingList")
     {
-        ProjectionIndexSerializationContext projection_index_context;
         projection_index_context.large_posting_getter
             = [&](const ISerialization::SubstreamPath & substream_path) -> LargePostingListWriterStream *
         {
