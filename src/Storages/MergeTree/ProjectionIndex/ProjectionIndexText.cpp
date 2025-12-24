@@ -180,7 +180,7 @@ Block tokenize(
                         }
 
                         current_posting_list->writer().add(static_cast<UInt32>(offsets[pr]), &arena, packed_buffer);
-                        return true;
+                        return false;
                     });
             }
         }

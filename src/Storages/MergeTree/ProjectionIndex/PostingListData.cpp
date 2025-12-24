@@ -478,7 +478,7 @@ struct ReaderStreamCursor
     UInt32 buf_size;
     UInt32 pos;
 
-    ReaderStreamCursor(LargePostingListReaderStreamPtr s, UInt32 first_doc_id, UInt32 total_count)
+    ReaderStreamCursor(LargePostingListReaderStreamPtr s, UInt32 first_doc_id, UInt32 total_count, UInt64 offset, bool do_seek)
         : stream(std::move(s))
         , doc_buffer(stream->doc_buffer)
         , last_doc_id(first_doc_id)
@@ -498,6 +498,10 @@ struct ReaderStreamCursor
             doc_buffer[0] = first_doc_id;
         }
         chassert(doc_buffer);
+        if (do_seek)
+            static_cast<MergeTreeReaderStream &>(*stream).seekToMark({offset, 0});
+        else
+            chassert(static_cast<UInt64>(stream->getPosition()) == offset);
     }
 
     /// Embedded postings c'tor
@@ -809,7 +813,7 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     if (!lazy_posting_stream->merged_embedded_postings.empty())
         cursors.emplace_back(lazy_posting_stream->merged_embedded_postings.data(), lazy_posting_stream->merged_embedded_postings.size());
     for (const auto & lazy_stream : lazy_posting_stream->streams)
-        cursors.emplace_back(lazy_stream.stream, lazy_stream.first_doc_id, lazy_stream.doc_count);
+        cursors.emplace_back(lazy_stream.stream, lazy_stream.first_doc_id, lazy_stream.doc_count, lazy_stream.offset, false);
 
     UInt32 last_doc_id;
 
@@ -884,7 +888,7 @@ void PostingListStream::collect(UInt32 * buf) const
     if (!lazy_posting_stream->merged_embedded_postings.empty())
         cursors.emplace_back(lazy_posting_stream->merged_embedded_postings.data(), lazy_posting_stream->merged_embedded_postings.size());
     for (const auto & lazy_stream : lazy_posting_stream->streams)
-        cursors.emplace_back(lazy_stream.stream, lazy_stream.first_doc_id, lazy_stream.doc_count);
+        cursors.emplace_back(lazy_stream.stream, lazy_stream.first_doc_id, lazy_stream.doc_count, lazy_stream.offset, true);
 
     UInt32 buffered = 0;
     auto emit = [&](UInt32 doc_id) { buf[buffered++] = doc_id; };
@@ -1000,148 +1004,6 @@ void PostingListStream::merge(const PostingListStream & other)
     doc_count += other.doc_count;
 
     chassert(doc_count > MAX_SIZE_OF_EMBEDDED_POSTINGS);
-}
-
-void PostingListInMemory::addRangeClosed(UInt32 min, UInt32 max)
-{
-    if (!empty())
-        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "PostingListInMemory::addRangeClosed only supports adding range when empty");
-
-    if (max < min)
-        return;
-
-    new (&m.bitmap) PostingListBitmap();
-    m.bitmap.addRangeClosed(min, max);
-}
-
-void PostingListInMemory::addRange(UInt32 min, UInt32 max)
-{
-    if (!empty())
-        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "PostingListInMemory::addRange only supports adding range when empty");
-
-    if (max <= min)
-        return;
-
-    new (&m.bitmap) PostingListBitmap();
-    m.bitmap.addRange(min, max);
-}
-
-void PostingListInMemory::write(WriteBuffer & out, UInt32 * doc_delta_buffer, uint8_t * packed_buffer) const
-{
-    size_t write_bytes = out.count();
-    const UInt32 doc_count = size();
-    VarInt::writeVarUInt32(doc_count, out);
-    if (doc_count == 0)
-        return;
-
-    chassert(doc_delta_buffer);
-    chassert(packed_buffer);
-
-    UInt32 last_doc_id = 0;
-    UInt32 buffered = 0;
-    bool first = true;
-
-    auto flush = [&](bool final)
-    {
-        if (buffered == 0)
-            return;
-
-        uint8_t * end = final ? p4enc32(doc_delta_buffer, buffered, packed_buffer) : p4enc128v32(doc_delta_buffer, 128, packed_buffer);
-
-        const UInt32 len = static_cast<UInt32>(end - packed_buffer);
-        chassert(len <= 512);
-
-        VarInt::writeVarUInt32(len, out);
-        out.write(reinterpret_cast<const char *>(packed_buffer), len);
-
-        buffered = 0;
-    };
-
-    auto write_doc = [&](UInt32 doc_id)
-    {
-        if (first)
-        {
-            /// First doc id is written as-is
-            VarInt::writeVarUInt32(doc_id, out);
-            last_doc_id = doc_id;
-            first = false;
-            return;
-        }
-
-        if (doc_id <= last_doc_id)
-        {
-            if (doc_id == last_doc_id)
-                return;
-
-            throw Exception(ErrorCodes::INCORRECT_DATA, "Received out of order doc id. doc_id = {}, last_doc_id = {}", doc_id, last_doc_id);
-        }
-
-        doc_delta_buffer[buffered++] = doc_id - last_doc_id - 1;
-        last_doc_id = doc_id;
-
-        if (buffered == 128)
-            flush(false);
-    };
-
-    if (isBitmap())
-    {
-        for (UInt32 doc_id : m.bitmap)
-            write_doc(doc_id);
-    }
-    else
-    {
-        for (UInt32 doc_id : m.set)
-            write_doc(doc_id);
-    }
-
-    flush(true);
-    write_bytes = out.count() - write_bytes;
-    if (write_bytes > std::numeric_limits<UInt32>::max())
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "write_bytes = {} > max uint32", write_bytes);
-}
-
-void PostingListInMemory::read(
-    ReadBuffer & in, UInt32 * doc_buffer, uint8_t * packed_buffer, const MergedPartOffsets * merged_part_offsets, size_t part_index)
-{
-    UInt32 left_count;
-    UInt32 last_doc_id;
-    VarInt::readVarUInt32(left_count, in);
-    VarInt::readVarUInt32(last_doc_id, in);
-
-    if (merged_part_offsets)
-        add(static_cast<UInt32>((*merged_part_offsets)[part_index, last_doc_id]));
-    else
-        add(last_doc_id);
-
-    --left_count;
-
-    while (left_count > 0)
-    {
-        UInt32 bytes;
-        VarInt::readVarUInt32(bytes, in);
-        UInt32 count = std::min(left_count, UInt32(128));
-        if (in.available() >= bytes)
-        {
-            uint8_t * packed_buffer_end = p4d1dec128v32(reinterpret_cast<uint8_t *>(in.position()), count, doc_buffer, last_doc_id);
-            in.position() = reinterpret_cast<char *>(packed_buffer_end);
-        }
-        else
-        {
-            chassert(bytes <= 512);
-            in.readStrict(reinterpret_cast<char *>(packed_buffer), bytes);
-            uint8_t * packed_buffer_end = p4d1dec128v32(packed_buffer, count, doc_buffer, last_doc_id);
-            chassert(packed_buffer_end - packed_buffer == bytes);
-        }
-
-        left_count -= count;
-        last_doc_id = doc_buffer[count - 1]; /// before offset re-mapping
-        if (merged_part_offsets)
-        {
-            for (UInt32 i = 0; i < count; ++i)
-                doc_buffer[i] = static_cast<UInt32>((*merged_part_offsets)[part_index, doc_buffer[i]]);
-        }
-        addMany(count, doc_buffer);
-    }
 }
 
 }

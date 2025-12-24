@@ -114,21 +114,11 @@ public:
             }
             else if (reinterpret_cast<const PostingListData *>(vec[0])->isStream())
             {
-                /// TODO(amos):
                 for (size_t i = offset; i < end; ++i)
                 {
                     const auto * posting_list_data = reinterpret_cast<const PostingListData *>(vec[i]);
                     chassert(posting_list_data->isStream());
                     posting_list_data->stream().write(*stream, *large_posting_stream, function->index_params);
-                }
-            }
-            else
-            {
-                for (size_t i = offset; i < end; ++i)
-                {
-                    const auto * posting_list_data = reinterpret_cast<const PostingListData *>(vec[i]);
-                    chassert(posting_list_data->isPosting());
-                    posting_list_data->posting().write(*stream, large_posting_stream->doc_buffer, large_posting_stream->packed_buffer);
                 }
             }
         }

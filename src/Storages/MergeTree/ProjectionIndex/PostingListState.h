@@ -52,43 +52,16 @@ public:
         ColumnArray & arr_to = assert_cast<ColumnArray &>(to);
         ColumnArray::Offsets & offsets_to = arr_to.getOffsets();
         const auto & posting_list_data = data(place);
-        if (posting_list_data.isPosting())
-        {
-            const auto & posting_list = posting_list_data.posting();
-            if (posting_list.isBitmap())
-            {
-                size_t num_docs = posting_list.m.bitmap.cardinality();
-                offsets_to.push_back(offsets_to.back() + num_docs);
-                typename ColumnVector<UInt32>::Container & data_to = assert_cast<ColumnVector<UInt32> &>(arr_to.getData()).getData();
-                size_t pos = data_to.size();
-                data_to.resize(data_to.size() + num_docs);
-                for (UInt32 doc : posting_list.m.bitmap)
-                    data_to[pos++] = doc;
-            }
-            else
-            {
-                size_t num_docs = posting_list.m.set.m_size;
-                offsets_to.push_back(offsets_to.back() + num_docs);
-                typename ColumnVector<UInt32>::Container & data_to = assert_cast<ColumnVector<UInt32> &>(arr_to.getData()).getData();
-                data_to.insert(posting_list.m.set.begin(), posting_list.m.set.end());
-            }
-        }
-        else if (posting_list_data.isStream())
-        {
-            const auto & posting_list = posting_list_data.stream();
-            if (posting_list.doc_count == 0)
-                return;
+        chassert(posting_list_data.isStream());
+        const auto & posting_list = posting_list_data.stream();
+        if (posting_list.doc_count == 0)
+            return;
 
-            offsets_to.push_back(offsets_to.back() + posting_list.doc_count);
-            typename ColumnVector<UInt32>::Container & data_to = assert_cast<ColumnVector<UInt32> &>(arr_to.getData()).getData();
-            size_t pos = data_to.size();
-            data_to.resize(data_to.size() + posting_list.doc_count);
-            posting_list.collect(&data_to[pos]);
-        }
-        else
-        {
-            chassert(false);
-        }
+        offsets_to.push_back(offsets_to.back() + posting_list.doc_count);
+        typename ColumnVector<UInt32>::Container & data_to = assert_cast<ColumnVector<UInt32> &>(arr_to.getData()).getData();
+        size_t pos = data_to.size();
+        data_to.resize(data_to.size() + posting_list.doc_count);
+        posting_list.collect(&data_to[pos]);
     }
 
     bool allocatesMemoryInArena() const override { return false; }
