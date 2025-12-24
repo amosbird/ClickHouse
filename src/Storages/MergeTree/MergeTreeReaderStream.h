@@ -125,10 +125,11 @@ struct LargePostingListReaderStream : public MergeTreeReaderStreamSingleColumnWh
 {
     template <typename... Args>
     explicit LargePostingListReaderStream(
-        const MergedPartOffsets * merged_part_offsets_, size_t part_index_, Args &&... args)
+        const MergedPartOffsets * merged_part_offsets_, size_t part_index_, size_t part_starting_offset_, Args &&... args)
         : MergeTreeReaderStreamSingleColumnWholePart{std::forward<Args>(args)...}
         , merged_part_offsets(merged_part_offsets_)
         , part_index(part_index_)
+        , part_starting_offset(part_starting_offset_)
     {
     }
 
@@ -137,6 +138,7 @@ struct LargePostingListReaderStream : public MergeTreeReaderStreamSingleColumnWh
 
     const MergedPartOffsets * merged_part_offsets = nullptr;
     size_t part_index = 0;
+    size_t part_starting_offset = 0;
 };
 
 /// Shared ownership is required to support lazy materialization. The reader stream may be accessed after the original

@@ -14,12 +14,14 @@ public:
         MergeTreeData::DataPartPtr data_part_,
         AlterConversionsPtr alter_conversions_,
         const MergedPartOffsets * merged_part_offsets_ = nullptr,
-        size_t part_index_ = 0)
+        size_t part_index_ = 0,
+        size_t part_starting_offset_ = 0)
         : IMergeTreeDataPartInfoForReader(data_part_->storage.getContext())
         , data_part(std::move(data_part_))
         , alter_conversions(std::move(alter_conversions_))
         , merged_part_offsets(merged_part_offsets_)
         , part_index(part_index_)
+        , part_starting_offset(part_starting_offset_)
     {
     }
 
@@ -92,6 +94,8 @@ public:
 
     size_t getPartIndex() const override { return part_index; }
 
+    size_t getPartStartingOffset() const override { return part_starting_offset; }
+
     MergeTreeData::DataPartPtr getDataPart() const { return data_part; }
 
     void setReadHints(const RangesInDataPartReadHints & read_hints_, const NamesAndTypesList & read_columns) override
@@ -109,6 +113,7 @@ private:
     RangesInDataPartReadHints read_hints;
     const MergedPartOffsets * merged_part_offsets;
     size_t part_index;
+    size_t part_starting_offset;
 };
 
 }

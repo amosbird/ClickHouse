@@ -1,6 +1,5 @@
 #include <Storages/MergeTree/ProjectionIndex/PostingListData.h>
 
-#include <Core/SortCursor.h>
 #include <IO/WriteBuffer.h>
 #include <IO/WriteHelpers.h>
 #include <Storages/MergeTree/MergeTreeDataPartWriterOnDisk.h>
@@ -479,24 +478,25 @@ struct ReaderStreamCursor
     UInt32 buf_size;
     UInt32 pos;
 
-    explicit ReaderStreamCursor(const ReaderStreamCursor * other)
-    {
-        *this = *other;
-        chassert(doc_buffer);
-    }
-
     ReaderStreamCursor(LargePostingListReaderStreamPtr s, UInt32 first_doc_id, UInt32 total_count)
         : stream(std::move(s))
         , doc_buffer(stream->doc_buffer)
         , last_doc_id(first_doc_id)
         , left_count(total_count - 1)
+        , buf_size(1)
+        , pos(0)
     {
         if (stream->merged_part_offsets)
-            doc_buffer[0] = (*stream->merged_part_offsets)[stream->part_index, first_doc_id];
+        {
+            if (stream->merged_part_offsets->isMappingEnabled())
+                doc_buffer[0] = (*stream->merged_part_offsets)[stream->part_index, first_doc_id];
+            else
+                doc_buffer[0] = first_doc_id + stream->part_starting_offset;
+        }
         else
+        {
             doc_buffer[0] = first_doc_id;
-        buf_size = 1;
-        pos = 0;
+        }
         chassert(doc_buffer);
     }
 
@@ -516,46 +516,58 @@ struct ReaderStreamCursor
         return doc_buffer[pos];
     }
 
-    UInt32 * ALWAYS_INLINE currentPtr() const
+    void ALWAYS_INLINE next()
     {
         chassert(pos < buf_size);
-        return &doc_buffer[pos];
-    }
-
-    bool ALWAYS_INLINE empty() const { return buf_size == pos && left_count == 0; }
-
-    bool ALWAYS_INLINE isLast(size_t batch_size = 1) const
-    {
-        size_t remaining_in_block = buf_size - pos;
-        chassert(batch_size <= remaining_in_block);
-        return batch_size == remaining_in_block && left_count == 0;
-    }
-
-    void ALWAYS_INLINE next(size_t batch_size = 1)
-    {
-        chassert(batch_size <= (buf_size - pos));
-        pos += batch_size;
-
+        ++pos;
         if (pos >= buf_size)
             loadNextBlock();
     }
 
-    size_t ALWAYS_INLINE getSize() const { return buf_size; }
-    size_t ALWAYS_INLINE getPosRef() const { return pos; }
+    bool ALWAYS_INLINE empty() const { return buf_size == pos && left_count == 0; }
 
-    bool ALWAYS_INLINE greater(const ReaderStreamCursor & other) const { return current() > other.current(); }
-    bool ALWAYS_INLINE greaterWithOffset(const ReaderStreamCursor & other, size_t offset, size_t other_offset) const
+    /// Batch emit all remaining documents in current buffer and beyond
+    template <typename Emit>
+    void emitAll(Emit && emit)
     {
-        chassert(pos + offset < buf_size);
-        chassert(other.pos + other_offset < other.buf_size);
-        return doc_buffer[pos + offset] > other.doc_buffer[other.pos + other_offset];
+        while (!empty())
+        {
+            size_t remaining = buf_size - pos;
+            for (size_t i = 0; i < remaining; ++i)
+                emit(doc_buffer[pos + i]);
+            pos = buf_size;
+            loadNextBlock();
+        }
     }
 
-    /// Inverted so that the priority queue elements are removed in ascending order.
-    bool ALWAYS_INLINE operator<(const ReaderStreamCursor & rhs) const { return greater(rhs); }
+    /// Emit up to next_min (exclusive), loading blocks as needed
+    template <typename Emit>
+    void emitUntil(UInt32 next_min, Emit && emit)
+    {
+        chassert(current() < next_min);
+        while (!empty())
+        {
+            // Emit entire block if all elements < next_min
+            if (doc_buffer[buf_size - 1] < next_min)
+            {
+                for (size_t i = pos; i < buf_size; ++i)
+                    emit(doc_buffer[i]);
+                pos = buf_size;
+                loadNextBlock();
+            }
+            else
+            {
+                // Emit partial block up to next_min
+                const UInt32 * it = std::lower_bound(doc_buffer + pos, doc_buffer + buf_size, next_min);
+                for (const UInt32 * p = doc_buffer + pos; p != it; ++p)
+                    emit(*p);
+                pos = it - doc_buffer;
+                break;
+            }
+        }
+    }
 
-    ReaderStreamCursor * ALWAYS_INLINE operator->() { return this; }
-    const ReaderStreamCursor * ALWAYS_INLINE operator->() const { return this; }
+    bool ALWAYS_INLINE operator<(const ReaderStreamCursor & rhs) const { return current() < rhs.current(); }
 
 private:
     void loadNextBlock()
@@ -587,8 +599,16 @@ private:
         last_doc_id = doc_buffer[count - 1];
         if (stream->merged_part_offsets)
         {
-            for (UInt32 i = 0; i < count; ++i)
-                doc_buffer[i] = (*stream->merged_part_offsets)[stream->part_index, doc_buffer[i]];
+            if (stream->merged_part_offsets->isMappingEnabled())
+            {
+                for (UInt32 i = 0; i < count; ++i)
+                    doc_buffer[i] = (*stream->merged_part_offsets)[stream->part_index, doc_buffer[i]];
+            }
+            else
+            {
+                for (UInt32 i = 0; i < count; ++i)
+                    doc_buffer[i] += stream->part_starting_offset;
+            }
         }
 
         left_count -= count;
@@ -596,6 +616,61 @@ private:
         pos = 0;
     }
 };
+
+struct ReaderStreamCursorNode
+{
+    ReaderStreamCursor * cursor;
+
+    /// Inverted so that the priority queue elements are removed in ascending order.
+    bool ALWAYS_INLINE operator<(const ReaderStreamCursorNode & rhs) const { return cursor->current() > rhs.cursor->current(); }
+};
+
+using ReaderStreamQueue = std::priority_queue<ReaderStreamCursorNode, std::vector<ReaderStreamCursorNode>>;
+
+template <typename EmitFirst, typename Emit>
+void mergePostingCursors(std::vector<ReaderStreamCursor> & cursors, EmitFirst && emit_first, Emit && emit)
+{
+    cursors.erase(std::remove_if(cursors.begin(), cursors.end(), [](const auto & c) { return c.empty(); }), cursors.end());
+
+    if (cursors.empty())
+        return;
+
+    if (cursors.size() == 1)
+    {
+        emit_first(cursors[0].current());
+        cursors[0].next();
+        cursors[0].emitAll(emit);
+        return;
+    }
+
+    ReaderStreamQueue heap;
+    for (auto & c : cursors)
+        heap.push(ReaderStreamCursorNode{&c});
+
+    /// Emit first doc
+    {
+        auto cur = heap.top();
+        heap.pop();
+        emit_first(cur.cursor->current());
+        cur.cursor->next();
+        if (!cur.cursor->empty())
+            heap.push(cur);
+    }
+
+    while (!heap.empty())
+    {
+        auto cur = heap.top();
+        heap.pop();
+
+        if (heap.empty())
+            cur.cursor->emitAll(emit);
+        else
+            cur.cursor->emitUntil(heap.top().cursor->current(), emit);
+
+        if (!cur.cursor->empty())
+            heap.push(cur);
+    }
+}
 
 LazyPostingStream::LazyPostingStream(const UInt32 * embedded_postings, UInt32 num_embedded_docs, ReaderStreamVector streams_)
     : merged_embedded_postings(embedded_postings, embedded_postings + num_embedded_docs)
@@ -618,9 +693,16 @@ void PostingListStream::read(ReadBuffer & in, LargePostingListReaderStreamPtr st
     chassert(stream);
 
     if (stream->merged_part_offsets)
-        embedded_postings[0] = (*stream->merged_part_offsets)[stream->part_index, last_doc_id];
+    {
+        if (stream->merged_part_offsets->isMappingEnabled())
+            embedded_postings[0] = (*stream->merged_part_offsets)[stream->part_index, last_doc_id];
+        else
+            embedded_postings[0] = last_doc_id + stream->part_starting_offset;
+    }
     else
+    {
         embedded_postings[0] = last_doc_id;
+    }
 
     if (doc_count == 1)
         return;
@@ -646,8 +728,16 @@ void PostingListStream::read(ReadBuffer & in, LargePostingListReaderStreamPtr st
 
         if (stream->merged_part_offsets)
         {
-            for (UInt32 i = 1; i < doc_count; ++i)
-                embedded_postings[i] = (*stream->merged_part_offsets)[stream->part_index, doc_buffer[i - 1]];
+            if (stream->merged_part_offsets->isMappingEnabled())
+            {
+                for (UInt32 i = 1; i < doc_count; ++i)
+                    embedded_postings[i] = (*stream->merged_part_offsets)[stream->part_index, doc_buffer[i - 1]];
+            }
+            else
+            {
+                for (UInt32 i = 1; i < doc_count; ++i)
+                    embedded_postings[i] = doc_buffer[i - 1] + stream->part_starting_offset;
+            }
         }
         else
         {
@@ -720,24 +810,13 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
         cursors.emplace_back(lazy_posting_stream->merged_embedded_postings.data(), lazy_posting_stream->merged_embedded_postings.size());
     for (const auto & lazy_stream : lazy_posting_stream->streams)
         cursors.emplace_back(lazy_stream.stream, lazy_stream.first_doc_id, lazy_stream.doc_count);
-    SortingQueueBatch<ReaderStreamCursor> queue(cursors);
-    cursors.clear();
 
-    chassert(queue.isValid());
-    auto [cursor, _] = queue.current();
-    UInt32 last_doc_id = cursor->current();
-
-    /// Write first doc inline
-    VarInt::writeVarUInt32(cursor->current(), wb);
-    queue.next(1);
+    UInt32 last_doc_id;
 
     /// Align to 128-doc blocks
     const UInt32 docs_per_large_block = (index_params.posting_list_block_size + 127) & ~127;
     const UInt32 large_doc_count = doc_count - 1;
     const UInt32 num_large_blocks = (large_doc_count + docs_per_large_block - 1) / docs_per_large_block;
-
-    VarInt::writeVarUInt32(num_large_blocks, wb);
-
     LargePostingBlockWriter block_writer(wb, stream.plain_hashing, docs_per_large_block);
 
     UInt32 buffered = 0;
@@ -758,23 +837,24 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
         buffered = 0;
     };
 
-    auto emit_doc = [&](UInt32 doc)
-    {
-        chassert(doc > last_doc_id);
-        doc_delta_buffer[buffered++] = doc - last_doc_id - 1;
-        last_doc_id = doc;
-        if (buffered == 128)
-            flush128();
-    };
-
-    while (queue.isValid())
-    {
-        auto [current, batch_to_emit] = queue.current();
-        chassert(batch_to_emit > 0);
-        for (size_t i = 0; i < batch_to_emit; ++i)
-            emit_doc(current->currentPtr()[i]);
-        queue.next(batch_to_emit);
-    }
+    mergePostingCursors(
+        cursors,
+        [&](UInt32 first_doc_id)
+        {
+            last_doc_id = first_doc_id;
+            VarInt::writeVarUInt32(first_doc_id, wb);
+            VarInt::writeVarUInt32(num_large_blocks, wb);
+        },
+        [&](UInt32 doc_id)
+        {
+            if (doc_id <= last_doc_id)
+                throwReadAfterEOF();
+            chassert(doc_id > last_doc_id);
+            doc_delta_buffer[buffered++] = doc_id - last_doc_id - 1;
+            last_doc_id = doc_id;
+            if (buffered == 128)
+                flush128();
+        });
 
     flush_tail();
     block_writer.finish(num_large_blocks);
@@ -805,19 +885,10 @@ void PostingListStream::collect(UInt32 * buf) const
         cursors.emplace_back(lazy_posting_stream->merged_embedded_postings.data(), lazy_posting_stream->merged_embedded_postings.size());
     for (const auto & lazy_stream : lazy_posting_stream->streams)
         cursors.emplace_back(lazy_stream.stream, lazy_stream.first_doc_id, lazy_stream.doc_count);
-    SortingQueueBatch<ReaderStreamCursor> queue(cursors);
-    cursors.clear();
-    chassert(queue.isValid());
 
     UInt32 buffered = 0;
-    while (queue.isValid())
-    {
-        auto [current, batch_to_emit] = queue.current();
-        chassert(batch_to_emit > 0);
-        memcpy(&buf[buffered], current->currentPtr(), batch_to_emit * sizeof(UInt32));
-        buffered += batch_to_emit;
-        queue.next(batch_to_emit);
-    }
+    auto emit = [&](UInt32 doc_id) { buf[buffered++] = doc_id; };
+    mergePostingCursors(cursors, emit, emit);
 }
 
 void PostingListStream::merge(const PostingListStream & other)

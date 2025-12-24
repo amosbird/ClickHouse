@@ -115,6 +115,8 @@ public:
     virtual const MergedPartOffsets * getMergedPartOffsets() const { return nullptr; }
 
     virtual size_t getPartIndex() const { return 0; }
+
+    virtual size_t getPartStartingOffset() const { return 0; }
 };
 
 using MergeTreeDataPartInfoForReaderPtr = std::shared_ptr<IMergeTreeDataPartInfoForReader>;
