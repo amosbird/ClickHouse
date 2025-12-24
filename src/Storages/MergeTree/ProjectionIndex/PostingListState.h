@@ -9,8 +9,6 @@
 namespace DB
 {
 
-MergeTreeIndexPtr textIndexCreator(const IndexDescription & index);
-
 class AggregateFunctionPostingList final : public IAggregateFunctionDataHelper<PostingListData, AggregateFunctionPostingList>
 {
     using Data = PostingListData;
@@ -28,27 +26,21 @@ public:
 
     void add(AggregateDataPtr, const IColumn **, size_t, Arena *) const override;
 
-    void merge(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena * arena) const override
+    /// TODO(amos): Currently `rhs` is const because its state is allocated in an Arena and will be
+    /// deallocated along with the Arena. This prevents moving its contents directly into `place`.
+    /// Investigate whether we can support move-merge by either:
+    ///   1) avoiding Arena allocation and managing memory with unique_ptr, or
+    ///   2) designing a separate move-safe memory pool for aggregate states.
+    ///
+    /// Current workaround: using const_cast on std::unique_ptr to move. This works but may be unsafe; needs review to
+    /// ensure correctness and avoid undefined behavior.
+    void merge(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena * /* arena */) const override
     {
         auto & lhs_posting_list_data = data(place);
         const auto & rhs_posting_list_data = data(rhs);
         chassert(lhs_posting_list_data.isStream());
         chassert(rhs_posting_list_data.isStream());
-        if (rhs_posting_list_data.stream().doc_count == 0)
-            return;
-
-        if (lhs_posting_list_data.stream().doc_count == 0)
-        {
-            auto * bitmap = arena->alignedAlloc(sizeof(PostingListBitmap), alignof(PostingListBitmap));
-            new (bitmap) PostingListBitmap();
-            lhs_posting_list_data.stream().embedded_postings = reinterpret_cast<PostingListBitmap *>(bitmap);
-        }
-
-        chassert(lhs_posting_list_data.stream().embedded_postings);
-        chassert(rhs_posting_list_data.stream().embedded_postings);
-
-        *lhs_posting_list_data.stream().embedded_postings |= *rhs_posting_list_data.stream().embedded_postings;
-        lhs_posting_list_data.stream().doc_count = lhs_posting_list_data.stream().embedded_postings->cardinality();
+        lhs_posting_list_data.stream().merge(rhs_posting_list_data.stream());
     }
 
     void serialize(ConstAggregateDataPtr, WriteBuffer &, std::optional<size_t>) const override;
@@ -87,14 +79,11 @@ public:
             if (posting_list.doc_count == 0)
                 return;
 
-            chassert(posting_list.embedded_postings);
-
             offsets_to.push_back(offsets_to.back() + posting_list.doc_count);
             typename ColumnVector<UInt32>::Container & data_to = assert_cast<ColumnVector<UInt32> &>(arr_to.getData()).getData();
             size_t pos = data_to.size();
             data_to.resize(data_to.size() + posting_list.doc_count);
-            for (UInt32 doc : *posting_list.embedded_postings)
-                data_to[pos++] = doc;
+            posting_list.collect(&data_to[pos]);
         }
         else
         {
@@ -102,7 +91,7 @@ public:
         }
     }
 
-    bool allocatesMemoryInArena() const override { return true; }
+    bool allocatesMemoryInArena() const override { return false; }
 
     /// Build index parameters from data type arguments. This path is only valid when the type is created via
     /// getPostingListType() and is used exclusively for metadata, not for the columns.txt persisted in data parts.

@@ -148,6 +148,8 @@ try
             large_posting_streams.emplace(
                 *stream_name,
                 std::make_shared<LargePostingListReaderStream>(
+                    data_part_info_for_read->getMergedPartOffsets(),
+                    data_part_info_for_read->getPartIndex(),
                     data_part_info_for_read->getDataPartStorage(),
                     *stream_name,
                     PROJECTION_INDEX_LARGE_POSTING_SUFFIX,

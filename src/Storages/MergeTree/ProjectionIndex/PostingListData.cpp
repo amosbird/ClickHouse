@@ -1,5 +1,6 @@
 #include <Storages/MergeTree/ProjectionIndex/PostingListData.h>
 
+#include <Core/SortCursor.h>
 #include <IO/WriteBuffer.h>
 #include <IO/WriteHelpers.h>
 #include <Storages/MergeTree/MergeTreeDataPartWriterOnDisk.h>
@@ -258,6 +259,9 @@ void PostingListWriter::add(UInt32 doc_id, Arena * arena, uint8_t * packed_buffe
     if (doc_id == last_doc_id)
         return;
 
+    /// TODO(amos): Arena reallocation here causes memory waste, because the old buffer cannot be reclaimed or reused.
+    /// We may replace it with a small-size bucket / buddy-style allocator to reuse buffers and reduce realloc + copy
+    /// overhead.
     switch (doc_count)
     {
         case 1:
@@ -379,7 +383,7 @@ void PostingListWriter::finish(
 
     /// Very small posting list:
     /// inline encode all doc deltas directly into wb
-    if (doc_count < 9)
+    if (doc_count <= MAX_SIZE_OF_EMBEDDED_POSTINGS)
     {
         uint8_t * packed_buffer_end = p4enc32(doc_delta_buffer, doc_count - 1, packed_buffer);
         UInt32 len = static_cast<UInt32>(packed_buffer_end - packed_buffer);
@@ -388,13 +392,13 @@ void PostingListWriter::finish(
         return;
     }
 
+    /// PostingList Format
     /// --------------------------------------------
     /// Large posting list mode
     ///
     /// wb:
     ///   doc_count
     ///   first_doc_id
-    ///   first_large_block_offset
     ///   num_large_blocks
     ///   [last_doc_id, offset] * N
     ///
@@ -414,6 +418,8 @@ void PostingListWriter::finish(
 
     /// Total number of large blocks in large_posting, computed as ceil division.
     const UInt32 num_large_blocks = (large_doc_count + docs_per_large_block - 1) / docs_per_large_block;
+
+    chassert(num_large_blocks >= 1);
     VarInt::writeVarUInt32(num_large_blocks, wb);
 
     LargePostingBlockWriter block_writer(wb, large_posting, docs_per_large_block);
@@ -438,23 +444,168 @@ void PostingListWriter::finish(
     block_writer.finish(num_large_blocks);
 }
 
-LazyPostingStream::LazyPostingStream(
-    UInt32 last_doc_id_, LargePostingListReaderStreamPtr stream_, const MergedPartOffsets * merged_part_offsets_, size_t part_index_)
-    : last_doc_id(last_doc_id_)
-    , streams({std::move(stream_)})
-    , merged_part_offsets(merged_part_offsets_)
-    , part_index(part_index_)
+ReaderStreamEntry::ReaderStreamEntry(LargePostingListReaderStreamPtr stream_, UInt32 first_doc_id_, UInt32 doc_count_, UInt64 offset_)
+    : stream(std::move(stream_))
+    , first_doc_id(first_doc_id_)
+    , doc_count(doc_count_)
+    , offset(offset_)
+{
+    chassert(stream);
+}
+
+ReaderStreamVector::ReaderStreamVector(LargePostingListReaderStreamPtr stream, UInt32 first_doc_id, UInt32 doc_count, UInt64 offset)
+    : entries({{std::move(stream), first_doc_id, doc_count, offset}})
+{
+}
+
+void ReaderStreamVector::add(LargePostingListReaderStreamPtr stream, UInt32 first_doc_id, UInt32 doc_count, UInt64 offset)
+{
+    for (const auto & e : entries)
+    {
+        if (e.stream.get() == stream.get())
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Duplicate LargePostingListReaderStream detected in merge");
+    }
+
+    entries.emplace_back(std::move(stream), first_doc_id, doc_count, offset);
+}
+
+struct ReaderStreamCursor
+{
+    LargePostingListReaderStreamPtr stream;
+
+    UInt32 * doc_buffer;
+    UInt32 last_doc_id;
+    UInt32 left_count;
+    UInt32 buf_size;
+    UInt32 pos;
+
+    explicit ReaderStreamCursor(const ReaderStreamCursor * other)
+    {
+        *this = *other;
+        chassert(doc_buffer);
+    }
+
+    ReaderStreamCursor(LargePostingListReaderStreamPtr s, UInt32 first_doc_id, UInt32 total_count)
+        : stream(std::move(s))
+        , doc_buffer(stream->doc_buffer)
+        , last_doc_id(first_doc_id)
+        , left_count(total_count - 1)
+    {
+        if (stream->merged_part_offsets)
+            doc_buffer[0] = (*stream->merged_part_offsets)[stream->part_index, first_doc_id];
+        else
+            doc_buffer[0] = first_doc_id;
+        buf_size = 1;
+        pos = 0;
+        chassert(doc_buffer);
+    }
+
+    /// Embedded postings c'tor
+    ReaderStreamCursor(UInt32 * doc_buffer_, UInt32 buf_size_)
+        : doc_buffer(doc_buffer_)
+        , left_count(0)
+        , buf_size(buf_size_)
+        , pos(0)
+    {
+        chassert(doc_buffer);
+    }
+
+    UInt32 ALWAYS_INLINE current() const
+    {
+        chassert(pos < buf_size);
+        return doc_buffer[pos];
+    }
+
+    UInt32 * ALWAYS_INLINE currentPtr() const
+    {
+        chassert(pos < buf_size);
+        return &doc_buffer[pos];
+    }
+
+    bool ALWAYS_INLINE empty() const { return buf_size == pos && left_count == 0; }
+
+    bool ALWAYS_INLINE isLast(size_t batch_size = 1) const
+    {
+        size_t remaining_in_block = buf_size - pos;
+        chassert(batch_size <= remaining_in_block);
+        return batch_size == remaining_in_block && left_count == 0;
+    }
+
+    void ALWAYS_INLINE next(size_t batch_size = 1)
+    {
+        chassert(batch_size <= (buf_size - pos));
+        pos += batch_size;
+
+        if (pos >= buf_size)
+            loadNextBlock();
+    }
+
+    size_t ALWAYS_INLINE getSize() const { return buf_size; }
+    size_t ALWAYS_INLINE getPosRef() const { return pos; }
+
+    bool ALWAYS_INLINE greater(const ReaderStreamCursor & other) const { return current() > other.current(); }
+    bool ALWAYS_INLINE greaterWithOffset(const ReaderStreamCursor & other, size_t offset, size_t other_offset) const
+    {
+        chassert(pos + offset < buf_size);
+        chassert(other.pos + other_offset < other.buf_size);
+        return doc_buffer[pos + offset] > other.doc_buffer[other.pos + other_offset];
+    }
+
+    /// Inverted so that the priority queue elements are removed in ascending order.
+    bool ALWAYS_INLINE operator<(const ReaderStreamCursor & rhs) const { return greater(rhs); }
+
+    ReaderStreamCursor * ALWAYS_INLINE operator->() { return this; }
+    const ReaderStreamCursor * ALWAYS_INLINE operator->() const { return this; }
+
+private:
+    void loadNextBlock()
+    {
+        if (left_count == 0)
+            return;
+
+        UInt32 count = std::min<UInt32>(128, left_count);
+        auto & large_posting_buffer = *stream->getDataBuffer();
+        UInt32 bytes;
+        VarInt::readVarUInt32(bytes, large_posting_buffer);
+
+        uint8_t * packed_buffer = stream->packed_buffer;
+
+        if (large_posting_buffer.available() >= bytes)
+        {
+            uint8_t * packed_buffer_end
+                = p4d1dec128v32(reinterpret_cast<uint8_t *>(large_posting_buffer.position()), count, doc_buffer, last_doc_id);
+            large_posting_buffer.position() = reinterpret_cast<char *>(packed_buffer_end);
+        }
+        else
+        {
+            chassert(bytes <= 512);
+            large_posting_buffer.readStrict(reinterpret_cast<char *>(packed_buffer), bytes);
+            uint8_t * packed_buffer_end = p4d1dec128v32(packed_buffer, count, doc_buffer, last_doc_id);
+            chassert(packed_buffer_end - packed_buffer == bytes);
+        }
+
+        last_doc_id = doc_buffer[count - 1];
+        if (stream->merged_part_offsets)
+        {
+            for (UInt32 i = 0; i < count; ++i)
+                doc_buffer[i] = (*stream->merged_part_offsets)[stream->part_index, doc_buffer[i]];
+        }
+
+        left_count -= count;
+        buf_size = count;
+        pos = 0;
+    }
+};
+
+LazyPostingStream::LazyPostingStream(const UInt32 * embedded_postings, UInt32 num_embedded_docs, ReaderStreamVector streams_)
+    : merged_embedded_postings(embedded_postings, embedded_postings + num_embedded_docs)
+    , streams(std::move(streams_))
 {
 }
 
 LazyPostingStream::~LazyPostingStream() = default;
 
-void PostingListStream::read(
-    ReadBuffer & in,
-    LargePostingListReaderStreamPtr stream,
-    const MergedPartOffsets * merged_part_offsets,
-    size_t part_index,
-    Arena * arena)
+void PostingListStream::read(ReadBuffer & in, LargePostingListReaderStreamPtr stream)
 {
     VarInt::readVarUInt32(doc_count, in);
     if (doc_count == 0)
@@ -464,32 +615,22 @@ void PostingListStream::read(
     UInt32 last_doc_id;
     VarInt::readVarUInt32(last_doc_id, in);
 
-    auto create_embedded_postings = [arena]()
-    {
-        auto * place = arena->alignedAlloc(sizeof(PostingListBitmap), alignof(PostingListBitmap));
-        new (place) PostingListBitmap();
-        return reinterpret_cast<PostingListBitmap *>(place);
-    };
-
-    if (doc_count == 1)
-    {
-        embedded_postings = create_embedded_postings();
-        if (merged_part_offsets)
-            embedded_postings->add((*merged_part_offsets)[part_index, last_doc_id]);
-        else
-            embedded_postings->add(last_doc_id);
-        return;
-    }
-
     chassert(stream);
 
-    UInt32 * doc_buffer = stream->doc_buffer;
-    uint8_t * packed_buffer = stream->packed_buffer;
+    if (stream->merged_part_offsets)
+        embedded_postings[0] = (*stream->merged_part_offsets)[stream->part_index, last_doc_id];
+    else
+        embedded_postings[0] = last_doc_id;
 
-    if (doc_count < 9)
+    if (doc_count == 1)
+        return;
+
+    if (doc_count <= MAX_SIZE_OF_EMBEDDED_POSTINGS)
     {
         UInt32 bytes;
         VarInt::readVarUInt32(bytes, in);
+        UInt32 * doc_buffer = stream->doc_buffer;
+        uint8_t * packed_buffer = stream->packed_buffer;
         if (in.available() >= bytes)
         {
             uint8_t * packed_buffer_end = p4d1dec128v32(reinterpret_cast<uint8_t *>(in.position()), doc_count - 1, doc_buffer, last_doc_id);
@@ -503,100 +644,39 @@ void PostingListStream::read(
             chassert(packed_buffer_end - packed_buffer == bytes);
         }
 
-        embedded_postings = create_embedded_postings();
-        if (merged_part_offsets)
+        if (stream->merged_part_offsets)
         {
-            embedded_postings->add((*merged_part_offsets)[part_index, last_doc_id]);
-            for (UInt32 i = 0; i < doc_count - 1; ++i)
-                embedded_postings->add((*merged_part_offsets)[part_index, doc_buffer[i]]);
+            for (UInt32 i = 1; i < doc_count; ++i)
+                embedded_postings[i] = (*stream->merged_part_offsets)[stream->part_index, doc_buffer[i - 1]];
         }
         else
         {
-            embedded_postings->add(last_doc_id);
-            embedded_postings->addMany(doc_count - 1, doc_buffer);
+            memcpy(&embedded_postings[1], doc_buffer, (doc_count - 1) * sizeof(UInt32));
         }
 
         return;
     }
 
-    /// Eager reading
+    UInt32 num_large_blocks;
+    VarInt::readVarUInt32(num_large_blocks, in);
+
+    chassert(num_large_blocks >= 1);
+
+    UInt32 dummy_id;
+    VarInt::readVarUInt32(dummy_id, in);
+    UInt64 large_posting_offset;
+    readVarUInt(large_posting_offset, in);
+
+    /// Skip metadata of large posting blocks
+    for (UInt32 i = 1; i < num_large_blocks; ++i)
     {
-        UInt32 num_large_blocks;
-        VarInt::readVarUInt32(num_large_blocks, in);
-
-        chassert(num_large_blocks >= 1);
-
-        UInt32 dummy_id;
+        UInt64 dummy_offset;
         VarInt::readVarUInt32(dummy_id, in);
-        UInt64 large_posting_offset;
-        readVarUInt(large_posting_offset, in);
-        chassert(static_cast<long>(large_posting_offset) == stream->getPosition());
-
-        /// Skip metadata of large posting blocks
-        for (UInt32 i = 1; i < num_large_blocks; ++i)
-        {
-            UInt64 dummy_offset;
-            VarInt::readVarUInt32(dummy_id, in);
-            readVarUInt(dummy_offset, in);
-        }
-
-        embedded_postings = create_embedded_postings();
-        if (merged_part_offsets)
-            embedded_postings->add(static_cast<UInt32>((*merged_part_offsets)[part_index, last_doc_id]));
-        else
-            embedded_postings->add(last_doc_id);
-
-        UInt32 left_count = doc_count - 1;
-        auto & large_posting_buffer = *stream->getDataBuffer();
-        while (left_count > 0)
-        {
-            UInt32 bytes;
-            VarInt::readVarUInt32(bytes, large_posting_buffer);
-            UInt32 count = std::min(left_count, UInt32(128));
-            if (large_posting_buffer.available() >= bytes)
-            {
-                uint8_t * packed_buffer_end
-                    = p4d1dec128v32(reinterpret_cast<uint8_t *>(large_posting_buffer.position()), count, doc_buffer, last_doc_id);
-                large_posting_buffer.position() = reinterpret_cast<char *>(packed_buffer_end);
-            }
-            else
-            {
-                chassert(bytes <= 512);
-                large_posting_buffer.readStrict(reinterpret_cast<char *>(packed_buffer), bytes);
-                uint8_t * packed_buffer_end = p4d1dec128v32(packed_buffer, count, doc_buffer, last_doc_id);
-                chassert(packed_buffer_end - packed_buffer == bytes);
-            }
-
-            left_count -= count;
-            last_doc_id = doc_buffer[count - 1]; /// before offset re-mapping
-            if (merged_part_offsets)
-            {
-                for (UInt32 i = 0; i < count; ++i)
-                    doc_buffer[i] = static_cast<UInt32>((*merged_part_offsets)[part_index, doc_buffer[i]]);
-            }
-            embedded_postings->addMany(count, doc_buffer);
-        }
+        readVarUInt(dummy_offset, in);
     }
 
-    /// TODO(amos): lazy
-
-    // auto * place = arena->alignedAlloc(sizeof(LazyPostingStream), alignof(LazyPostingStream));
-    // new (place) LazyPostingStream(last_doc_id, std::move(stream), merged_part_offsets, part_index);
-    // lazy_posting_stream = reinterpret_cast<LazyPostingStream *>(place);
-
-    // readVarUInt(lazy_posting_stream->large_posting_offset, in);
-    // chassert(static_cast<long>(lazy_posting_stream->large_posting_offset) == stream->getPosition());
-
-    // /// Skip metadata of large posting blocks
-    // UInt32 num_large_blocks;
-    // VarInt::readVarUInt32(num_large_blocks, in);
-    // for (UInt32 i = 0; i < num_large_blocks; ++i)
-    // {
-    //     UInt32 dummy_id;
-    //     UInt64 dummy_offset;
-    //     VarInt::readVarUInt32(dummy_id, in);
-    //     readVarUInt(dummy_offset, in);
-    // }
+    lazy_posting_stream
+        = std::make_unique<LazyPostingStream>(nullptr, 0, ReaderStreamVector{stream, last_doc_id, doc_count, large_posting_offset});
 }
 
 void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & stream, const MergeTreeIndexTextParams & index_params) const
@@ -605,46 +685,24 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     if (doc_count == 0)
         return;
 
-    UInt32 last_doc_id = 0;
-    bool first = true;
-
     /// --------------------------------------------
     /// Small posting list
     /// --------------------------------------------
     if (doc_count == 1)
     {
-        chassert(embedded_postings);
-        UInt32 doc_id = embedded_postings->minimum();
-        VarInt::writeVarUInt32(doc_id, wb);
+        VarInt::writeVarUInt32(embedded_postings[0], wb);
         return;
     }
 
     UInt32 * doc_delta_buffer = stream.doc_buffer;
     uint8_t * packed_buffer = stream.packed_buffer;
 
-    if (doc_count < 9)
+    if (doc_count <= MAX_SIZE_OF_EMBEDDED_POSTINGS)
     {
-        chassert(embedded_postings);
-
-        UInt32 buffered = 0;
-        auto emit = [&](UInt32 doc_id)
-        {
-            if (first)
-            {
-                VarInt::writeVarUInt32(doc_id, wb);
-                last_doc_id = doc_id;
-                first = false;
-                return;
-            }
-
-            doc_delta_buffer[buffered++] = doc_id - last_doc_id - 1;
-            last_doc_id = doc_id;
-        };
-
-        for (UInt32 doc_id : *embedded_postings)
-            emit(doc_id);
-
-        uint8_t * end = p4enc32(doc_delta_buffer, buffered, packed_buffer);
+        VarInt::writeVarUInt32(embedded_postings[0], wb);
+        for (UInt32 i = 1; i < doc_count; ++i)
+            doc_delta_buffer[i - 1] = embedded_postings[i] - embedded_postings[i - 1] - 1;
+        uint8_t * end = p4enc32(doc_delta_buffer, doc_count - 1, packed_buffer);
         UInt32 len = static_cast<UInt32>(end - packed_buffer);
         VarInt::writeVarUInt32(len, wb);
         wb.write(reinterpret_cast<const char *>(packed_buffer), len);
@@ -655,27 +713,34 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     /// Large posting list
     /// --------------------------------------------
 
-    /// TODO(amos): lazy
-    chassert(embedded_postings);
+    chassert(lazy_posting_stream);
+
+    std::vector<ReaderStreamCursor> cursors;
+    if (!lazy_posting_stream->merged_embedded_postings.empty())
+        cursors.emplace_back(lazy_posting_stream->merged_embedded_postings.data(), lazy_posting_stream->merged_embedded_postings.size());
+    for (const auto & lazy_stream : lazy_posting_stream->streams)
+        cursors.emplace_back(lazy_stream.stream, lazy_stream.first_doc_id, lazy_stream.doc_count);
+    SortingQueueBatch<ReaderStreamCursor> queue(cursors);
+    cursors.clear();
+
+    chassert(queue.isValid());
+    auto [cursor, _] = queue.current();
+    UInt32 last_doc_id = cursor->current();
+
+    /// Write first doc inline
+    VarInt::writeVarUInt32(cursor->current(), wb);
+    queue.next(1);
 
     /// Align to 128-doc blocks
     const UInt32 docs_per_large_block = (index_params.posting_list_block_size + 127) & ~127;
     const UInt32 large_doc_count = doc_count - 1;
     const UInt32 num_large_blocks = (large_doc_count + docs_per_large_block - 1) / docs_per_large_block;
 
-    /// Write first doc inline
-    auto write_first_doc = [&](UInt32 doc_id)
-    {
-        VarInt::writeVarUInt32(doc_id, wb);
-        VarInt::writeVarUInt32(num_large_blocks, wb);
-        last_doc_id = doc_id;
-        first = false;
-    };
+    VarInt::writeVarUInt32(num_large_blocks, wb);
 
     LargePostingBlockWriter block_writer(wb, stream.plain_hashing, docs_per_large_block);
 
     UInt32 buffered = 0;
-
     auto flush128 = [&]()
     {
         uint8_t * end = p4enc128v32(doc_delta_buffer, 128, packed_buffer);
@@ -693,29 +758,177 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
         buffered = 0;
     };
 
-    auto emit = [&](UInt32 doc_id)
+    auto emit_doc = [&](UInt32 doc)
     {
-        if (first)
-        {
-            write_first_doc(doc_id);
-            return;
-        }
-
-        chassert(doc_id > last_doc_id);
-        doc_delta_buffer[buffered++] = doc_id - last_doc_id - 1;
-        last_doc_id = doc_id;
-
+        chassert(doc > last_doc_id);
+        doc_delta_buffer[buffered++] = doc - last_doc_id - 1;
+        last_doc_id = doc;
         if (buffered == 128)
             flush128();
     };
 
-    for (UInt32 doc_id : *embedded_postings)
-        emit(doc_id);
+    while (queue.isValid())
+    {
+        auto [current, batch_to_emit] = queue.current();
+        chassert(batch_to_emit > 0);
+        for (size_t i = 0; i < batch_to_emit; ++i)
+            emit_doc(current->currentPtr()[i]);
+        queue.next(batch_to_emit);
+    }
 
     flush_tail();
     block_writer.finish(num_large_blocks);
+}
 
-    /// TODO(amos): lazy and merge
+void PostingListStream::collect(UInt32 * buf) const
+{
+    if (doc_count == 0)
+        return;
+
+    /// --------------------------------------------
+    /// Small posting list
+    /// --------------------------------------------
+    if (doc_count <= MAX_SIZE_OF_EMBEDDED_POSTINGS)
+    {
+        memcpy(buf, embedded_postings, doc_count * sizeof(UInt32));
+        return;
+    }
+
+    /// --------------------------------------------
+    /// Large posting list
+    /// --------------------------------------------
+
+    chassert(lazy_posting_stream);
+
+    std::vector<ReaderStreamCursor> cursors;
+    if (!lazy_posting_stream->merged_embedded_postings.empty())
+        cursors.emplace_back(lazy_posting_stream->merged_embedded_postings.data(), lazy_posting_stream->merged_embedded_postings.size());
+    for (const auto & lazy_stream : lazy_posting_stream->streams)
+        cursors.emplace_back(lazy_stream.stream, lazy_stream.first_doc_id, lazy_stream.doc_count);
+    SortingQueueBatch<ReaderStreamCursor> queue(cursors);
+    cursors.clear();
+    chassert(queue.isValid());
+
+    UInt32 buffered = 0;
+    while (queue.isValid())
+    {
+        auto [current, batch_to_emit] = queue.current();
+        chassert(batch_to_emit > 0);
+        memcpy(&buf[buffered], current->currentPtr(), batch_to_emit * sizeof(UInt32));
+        buffered += batch_to_emit;
+        queue.next(batch_to_emit);
+    }
+}
+
+void PostingListStream::merge(const PostingListStream & other)
+{
+    if (other.doc_count == 0)
+        return;
+
+    // -----------------------------
+    // Case 0: this is empty, take other
+    // -----------------------------
+    if (doc_count == 0)
+    {
+        /// TODO(amos): check if this const cast is safe
+        *this = PostingListStream(std::move(const_cast<PostingListStream &>(other)));
+        return;
+    }
+
+    const bool lhs_embedded = doc_count <= MAX_SIZE_OF_EMBEDDED_POSTINGS;
+    const bool rhs_embedded = other.doc_count <= MAX_SIZE_OF_EMBEDDED_POSTINGS;
+
+    /// TODO(amos): if const cast is not valid, use the following code
+    // if (doc_count == 0)
+    // {
+    //     if (rhs_embedded)
+    //     {
+    //         std::copy(other.embedded_postings, other.embedded_postings + other.doc_count, embedded_postings);
+    //     }
+    //     else
+    //     {
+    //         lazy_posting_stream = std::make_unique<LazyPostingStream>(
+    //             other.lazy_posting_stream->merged_embedded_postings.data(),
+    //             static_cast<UInt32>(other.lazy_posting_stream->merged_embedded_postings.size()),
+    //             other.lazy_posting_stream->streams);
+    //     }
+    //     doc_count = other.doc_count;
+    //     return;
+    // }
+
+    // -----------------------------
+    // Case 1: both embedded
+    // -----------------------------
+    if (lhs_embedded && rhs_embedded)
+    {
+        chassert(!lazy_posting_stream);
+        chassert(!other.lazy_posting_stream);
+
+        UInt32 total_count = doc_count + other.doc_count;
+
+        if (total_count <= MAX_SIZE_OF_EMBEDDED_POSTINGS)
+        {
+            // in-place merge
+            std::copy(other.embedded_postings, other.embedded_postings + other.doc_count, embedded_postings + doc_count);
+            std::inplace_merge(embedded_postings, embedded_postings + doc_count, embedded_postings + total_count);
+            doc_count = total_count;
+            return;
+        }
+
+        lazy_posting_stream = std::make_unique<LazyPostingStream>();
+        lazy_posting_stream->merged_embedded_postings.reserve(total_count);
+
+        std::merge(
+            embedded_postings,
+            embedded_postings + doc_count,
+            other.embedded_postings,
+            other.embedded_postings + other.doc_count,
+            std::back_inserter(lazy_posting_stream->merged_embedded_postings));
+
+        doc_count = total_count;
+        return;
+    }
+
+    // -----------------------------
+    // Case 2: at least one side is lazy
+    // -----------------------------
+    if (lhs_embedded)
+    {
+        chassert(!lazy_posting_stream);
+        lazy_posting_stream = std::make_unique<LazyPostingStream>(embedded_postings, doc_count);
+    }
+    else
+    {
+        chassert(lazy_posting_stream);
+    }
+
+    UInt32 sz = lazy_posting_stream->merged_embedded_postings.size();
+    if (rhs_embedded)
+    {
+        chassert(!other.lazy_posting_stream);
+        lazy_posting_stream->merged_embedded_postings.insert(
+            lazy_posting_stream->merged_embedded_postings.end(), other.embedded_postings, other.embedded_postings + other.doc_count);
+    }
+    else
+    {
+        chassert(other.lazy_posting_stream);
+        lazy_posting_stream->merged_embedded_postings.insert(
+            lazy_posting_stream->merged_embedded_postings.end(),
+            other.lazy_posting_stream->merged_embedded_postings.begin(),
+            other.lazy_posting_stream->merged_embedded_postings.end());
+    }
+
+    // in-place merge (assume both halves sorted, no duplicates)
+    const auto mid = lazy_posting_stream->merged_embedded_postings.begin() + sz;
+    std::inplace_merge(lazy_posting_stream->merged_embedded_postings.begin(), mid, lazy_posting_stream->merged_embedded_postings.end());
+
+    // merge streams
+    if (other.lazy_posting_stream)
+        lazy_posting_stream->streams.merge(other.lazy_posting_stream->streams);
+
+    doc_count += other.doc_count;
+
+    chassert(doc_count > MAX_SIZE_OF_EMBEDDED_POSTINGS);
 }
 
 void PostingListInMemory::addRangeClosed(UInt32 min, UInt32 max)

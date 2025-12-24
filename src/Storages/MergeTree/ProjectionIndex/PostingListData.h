@@ -3,7 +3,8 @@
 #include <base/defines.h>
 #include <base/types.h>
 
-#include <set>
+#include <memory>
+#include <vector>
 #include <roaring/roaring.hh>
 
 namespace DB
@@ -599,54 +600,73 @@ struct SharedPtrAddressComparator
 struct LargePostingListReaderStream;
 using LargePostingListReaderStreamPtr = std::shared_ptr<LargePostingListReaderStream>;
 
+struct ReaderStreamEntry
+{
+    LargePostingListReaderStreamPtr stream;
+    UInt32 first_doc_id;
+    UInt32 doc_count;
+
+    /// TODO(amos): Redundant for merge path: blocks are consumed sequentially
+    UInt64 offset;
+
+    ReaderStreamEntry(LargePostingListReaderStreamPtr stream_, UInt32 first_doc_id_, UInt32 doc_count_, UInt64 offset_);
+
+    bool operator==(const ReaderStreamEntry & other) const { return stream.get() == other.stream.get(); }
+};
+
+struct ReaderStreamVector
+{
+    std::vector<ReaderStreamEntry> entries;
+
+    ReaderStreamVector() = default;
+
+    ReaderStreamVector(LargePostingListReaderStreamPtr stream, UInt32 first_doc_id, UInt32 doc_count, UInt64 offset);
+
+    void add(LargePostingListReaderStreamPtr stream, UInt32 first_doc_id, UInt32 doc_count, UInt64 offset);
+
+    void merge(const ReaderStreamVector & other)
+    {
+        for (const auto & e : other.entries)
+            add(e.stream, e.first_doc_id, e.doc_count, e.offset);
+    }
+
+    size_t size() const { return entries.size(); }
+
+    bool empty() const { return entries.empty(); }
+
+    void clear() { entries.clear(); }
+
+    // --- support range-based for ---
+    auto begin() { return entries.begin(); }
+    auto end() { return entries.end(); }
+    auto begin() const { return entries.begin(); }
+    auto end() const { return entries.end(); }
+};
+
 struct LargePostingListWriterStream;
 
-/// Initialized once during deserialization prefix and reused across columns.
-/// Owns mutable read state and is not thread-safe.
+/// Initialized once during deserialization and reused across columns.
 struct LazyPostingStream
 {
-    UInt32 doc_buffer_pos = 0;
-    UInt32 doc_buffer_up_to = 0;
-    UInt32 left_count = 0;
+    std::vector<UInt32> merged_embedded_postings;
+    ReaderStreamVector streams;
 
-    UInt32 last_doc_id;
-
-    UInt32 num_large_blocks = 0;
-    UInt64 * large_block_offsets = nullptr;
-    UInt32 * large_block_last_doc_ids = nullptr;
-
-    UInt64 large_posting_offset = 0;
-    std::set<LargePostingListReaderStreamPtr, SharedPtrAddressComparator> streams;
-
-    /// Lives for the entire merge process; a raw pointer is sufficient.
-    const MergedPartOffsets * merged_part_offsets;
-
-    /// Index of the source part being merged.
-    size_t part_index;
-
-    LazyPostingStream(
-        UInt32 last_doc_id_, LargePostingListReaderStreamPtr stream_, const MergedPartOffsets * merged_part_offsets_, size_t part_index_);
-
+    LazyPostingStream() = default;
+    LazyPostingStream(const UInt32 * embedded_postings, UInt32 num_embedded_docs, ReaderStreamVector streams_ = {});
     ~LazyPostingStream();
-
-    /// Return false if EOS
-    bool get(UInt32 & doc);
-
-    // void restart(UInt32 * embedded_docs, UInt32 num_embedded_docs, UInt32 doc_count)
-    // {
-    //     doc_buffer_pos = 0;
-    //     doc_buffer_up_to = num_embedded_docs;
-    //     memcpy(doc_buffer, embedded_docs, doc_buffer_up_to);
-    //     left_count = doc_count;
-    // }
 };
+
+using LazyPostingStreamPtr = std::unique_ptr<LazyPostingStream>;
+
+inline static constexpr UInt64 MAX_SIZE_OF_EMBEDDED_POSTINGS = 6;
 
 struct alignas(8) PostingListStream
 {
     Int32 type = -2;
     UInt32 doc_count = 0;
-    PostingListBitmap * embedded_postings = nullptr;
-    LazyPostingStream * lazy_posting_stream = nullptr;
+
+    UInt32 embedded_postings[MAX_SIZE_OF_EMBEDDED_POSTINGS];
+    LazyPostingStreamPtr lazy_posting_stream;
 
     PostingListStream() = default;
     PostingListStream(const PostingListStream &) = delete;
@@ -655,13 +675,15 @@ struct alignas(8) PostingListStream
     PostingListStream(PostingListStream && other) noexcept
         : type(other.type)
         , doc_count(other.doc_count)
-        , embedded_postings(other.embedded_postings)
-        , lazy_posting_stream(other.lazy_posting_stream)
+        , lazy_posting_stream(std::move(other.lazy_posting_stream))
     {
+        if (doc_count > 0 && doc_count <= MAX_SIZE_OF_EMBEDDED_POSTINGS)
+        {
+            chassert(!lazy_posting_stream);
+            memcpy(embedded_postings, other.embedded_postings, doc_count * sizeof(UInt32));
+        }
         other.type = -2;
         other.doc_count = 0;
-        other.embedded_postings = nullptr;
-        other.lazy_posting_stream = nullptr;
     }
 
     PostingListStream & operator=(PostingListStream && other) noexcept
@@ -670,33 +692,28 @@ struct alignas(8) PostingListStream
         {
             type = other.type;
             doc_count = other.doc_count;
-            embedded_postings = other.embedded_postings;
-            lazy_posting_stream = other.lazy_posting_stream;
+            lazy_posting_stream = std::move(other.lazy_posting_stream);
+
+            if (doc_count > 0 && doc_count <= MAX_SIZE_OF_EMBEDDED_POSTINGS)
+            {
+                chassert(!lazy_posting_stream);
+                memcpy(embedded_postings, other.embedded_postings, doc_count * sizeof(UInt32));
+            }
 
             other.type = -2;
             other.doc_count = 0;
-            other.embedded_postings = nullptr;
-            other.lazy_posting_stream = nullptr;
         }
         return *this;
     }
 
-    ~PostingListStream()
-    {
-        if (embedded_postings)
-            embedded_postings->~PostingListBitmap();
-        if (lazy_posting_stream)
-            lazy_posting_stream->~LazyPostingStream();
-    }
-
-    void read(
-        ReadBuffer & in,
-        LargePostingListReaderStreamPtr stream,
-        const MergedPartOffsets * merged_part_offsets,
-        size_t part_index,
-        Arena * arena);
+    void read(ReadBuffer & in, LargePostingListReaderStreamPtr stream);
 
     void write(WriteBuffer & wb, LargePostingListWriterStream & stream, const MergeTreeIndexTextParams & index_params) const;
+
+    /// Collects all doc IDs into `buf`. Caller must preallocate `buf` with more than `doc_count` elements.
+    void collect(UInt32 * buf) const;
+
+    void merge(const PostingListStream & other);
 };
 
 static_assert(sizeof(PostingListStream) <= 40, "PostingListStream must be less than 40 bytes");

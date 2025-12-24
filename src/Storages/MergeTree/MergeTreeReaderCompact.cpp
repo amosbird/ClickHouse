@@ -223,8 +223,6 @@ void MergeTreeReaderCompact::readData(
                 posting_reader->getDataBuffer(); /// Call init()
                 return posting_reader;
             };
-            projection_index_context.merged_part_offsets = data_part_info_for_read->getMergedPartOffsets();
-            projection_index_context.part_index = data_part_info_for_read->getPartIndex();
             deserialize_settings.projection_index_context = &projection_index_context;
         }
 

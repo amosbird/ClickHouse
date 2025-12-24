@@ -16,8 +16,6 @@ using LargePostingListReaderStreamGetter = std::function<LargePostingListReaderS
 struct ProjectionIndexDeserializationContext
 {
     LargePostingListReaderStreamGetter large_posting_getter;
-    const MergedPartOffsets * merged_part_offsets = nullptr;
-    UInt64 part_index = 0;
     UInt64 row_start = 0;
     UInt64 row_end = 0;
 };

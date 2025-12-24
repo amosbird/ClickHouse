@@ -275,6 +275,8 @@ void MergeTreeReaderWide::addStreams(
             large_posting_streams.emplace(
                 *stream_name,
                 std::make_shared<LargePostingListReaderStream>(
+                    data_part_info_for_read->getMergedPartOffsets(),
+                    data_part_info_for_read->getPartIndex(),
                     data_part_info_for_read->getDataPartStorage(),
                     *stream_name,
                     PROJECTION_INDEX_LARGE_POSTING_SUFFIX,
@@ -607,8 +609,6 @@ void MergeTreeReaderWide::readData(
             posting_reader->getDataBuffer(); /// Call init()
             return posting_reader;
         };
-        projection_index_context.merged_part_offsets = data_part_info_for_read->getMergedPartOffsets();
-        projection_index_context.part_index = data_part_info_for_read->getPartIndex();
         deserialize_settings.projection_index_context = &projection_index_context;
     }
 

@@ -188,12 +188,7 @@ public:
                 {
                     auto & posting_list_data = reinterpret_cast<PostingListData &>(*place);
                     chassert(posting_list_data.isStream());
-                    posting_list_data.stream().read(
-                        *stream,
-                        large_posting_stream,
-                        settings.projection_index_context->merged_part_offsets,
-                        settings.projection_index_context->part_index,
-                        &arena);
+                    posting_list_data.stream().read(*stream, large_posting_stream);
                 }
                 catch (...)
                 {
