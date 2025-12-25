@@ -2,6 +2,7 @@
 
 #include <Core/Field.h>
 #include <Core/SortDescription.h>
+#include <Storages/IndicesDescription.h>
 #include <Storages/MergeTree/ProjectionIndex/IProjectionIndex.h>
 
 namespace DB
@@ -35,10 +36,15 @@ public:
     calculate(const ProjectionDescription & projection_desc, const Block & block, ContextPtr context, const IColumnPermutation * perm_ptr)
         const override;
 
+    const IndexDescription & getIndexDescription() const override;
+
+    std::shared_ptr<const MergeTreeIndexText> getTextIndex() const { return text_index; }
+
 private:
     ASTPtr index_ast;
     String col_name;
     SortDescription sort_description;
+    IndexDescription index_description;
     std::shared_ptr<const MergeTreeIndexText> text_index;
 };
 

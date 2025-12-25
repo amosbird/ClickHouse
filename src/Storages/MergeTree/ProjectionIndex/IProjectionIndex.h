@@ -17,6 +17,8 @@ using IColumnPermutation = PaddedPODArray<size_t>;
 
 class ASTProjectionDeclaration;
 
+struct IndexDescription;
+
 /// Base interface for projection index implementations.
 class IProjectionIndex
 {
@@ -32,6 +34,8 @@ public:
     virtual Block calculate(
         const ProjectionDescription & projection_desc, const Block & block, ContextPtr context, const IColumnPermutation * perm_ptr) const
         = 0;
+
+    virtual const IndexDescription & getIndexDescription() const;
 };
 
 using ProjectionIndexPtr = std::shared_ptr<IProjectionIndex>;

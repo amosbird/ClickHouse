@@ -12,6 +12,15 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int INCORRECT_QUERY;
+    extern const int NOT_IMPLEMENTED;
+}
+
+const IndexDescription & IProjectionIndex::getIndexDescription() const
+{
+    throw Exception(
+        ErrorCodes::NOT_IMPLEMENTED,
+        "IProjectionIndex::getIndexDescription() is not implemented for projection index type '{}'",
+        getName());
 }
 
 IProjectionIndex::~IProjectionIndex() = default;

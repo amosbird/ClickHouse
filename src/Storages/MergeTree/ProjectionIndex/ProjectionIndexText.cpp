@@ -65,8 +65,10 @@ void ProjectionIndexText::fillProjectionDescription(
         type = type_nullable->getNestedType();
 
     ColumnsDescription index_columns{{index_col.name, type}};
-    static_cast<ProjectionIndexText &>(*result.index).text_index = std::static_pointer_cast<const MergeTreeIndexText>(
-        textIndexCreator(IndexDescription::getIndexFromAST(index_ast, index_columns, /* is_implicitly_created */ true, query_context)));
+    static_cast<ProjectionIndexText &>(*result.index).index_description
+        = IndexDescription::getIndexFromAST(index_ast, index_columns, /* is_implicitly_created */ true, query_context);
+    static_cast<ProjectionIndexText &>(*result.index).text_index
+        = std::static_pointer_cast<const MergeTreeIndexText>(textIndexCreator(index_description));
 
     result.required_columns = {col_name, "_part_offset"};
     result.with_parent_part_offset = true;
@@ -94,6 +96,11 @@ void ProjectionIndexText::fillProjectionDescription(
     metadata.setColumns(std::move(projection_columns));
 
     result.metadata = std::make_shared<StorageInMemoryMetadata>(metadata);
+}
+
+const IndexDescription & ProjectionIndexText::getIndexDescription() const
+{
+    return index_description;
 }
 
 namespace

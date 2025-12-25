@@ -6,6 +6,13 @@
 #include <memory>
 #include <vector>
 
+namespace roaring
+{
+
+class Roaring;
+
+}
+
 namespace DB
 {
 
@@ -67,6 +74,15 @@ static_assert(sizeof(PostingListWriter) <= 40, "PostingListWriter must be less t
 struct LargePostingListReaderStream;
 using LargePostingListReaderStreamPtr = std::shared_ptr<LargePostingListReaderStream>;
 
+struct LargePostingBlockMeta
+{
+    UInt32 last_doc_id;
+    UInt32 doc_count;
+    UInt64 offset;
+};
+
+using LargePostingBlockMetas = std::vector<LargePostingBlockMeta>;
+
 struct ReaderStreamEntry
 {
     LargePostingListReaderStreamPtr stream;
@@ -74,11 +90,15 @@ struct ReaderStreamEntry
     UInt32 doc_count;
 
     /// TODO(amos): Redundant for merge path: blocks are consumed sequentially
-    UInt64 offset;
+    LargePostingBlockMetas large_posting_blocks;
 
-    ReaderStreamEntry(LargePostingListReaderStreamPtr stream_, UInt32 first_doc_id_, UInt32 doc_count_, UInt64 offset_);
+    ReaderStreamEntry(
+        LargePostingListReaderStreamPtr stream_, UInt32 first_doc_id_, UInt32 doc_count_, LargePostingBlockMetas large_posting_blocks_);
 
     bool operator==(const ReaderStreamEntry & other) const { return stream.get() == other.stream.get(); }
+
+    static std::shared_ptr<roaring::Roaring>
+    materializeLargeBlockIntoBitmap(LargePostingListReaderStream & stream, UInt32 last_doc_id, UInt32 doc_count, UInt64 offset);
 };
 
 struct ReaderStreamVector
@@ -87,14 +107,15 @@ struct ReaderStreamVector
 
     ReaderStreamVector() = default;
 
-    ReaderStreamVector(LargePostingListReaderStreamPtr stream, UInt32 first_doc_id, UInt32 doc_count, UInt64 offset);
+    ReaderStreamVector(
+        LargePostingListReaderStreamPtr stream, UInt32 first_doc_id, UInt32 doc_count, LargePostingBlockMetas large_posting_blocks);
 
-    void add(LargePostingListReaderStreamPtr stream, UInt32 first_doc_id, UInt32 doc_count, UInt64 offset);
+    void add(LargePostingListReaderStreamPtr stream, UInt32 first_doc_id, UInt32 doc_count, LargePostingBlockMetas large_posting_blocks);
 
     void merge(const ReaderStreamVector & other)
     {
         for (const auto & e : other.entries)
-            add(e.stream, e.first_doc_id, e.doc_count, e.offset);
+            add(e.stream, e.first_doc_id, e.doc_count, e.large_posting_blocks);
     }
 
     size_t size() const { return entries.size(); }
@@ -129,7 +150,7 @@ inline static constexpr UInt64 MAX_SIZE_OF_EMBEDDED_POSTINGS = 6;
 
 struct alignas(8) PostingListStream
 {
-    Int32 type = -2;
+    Int32 type = 0;
     UInt32 doc_count = 0;
 
     UInt32 embedded_postings[MAX_SIZE_OF_EMBEDDED_POSTINGS];
@@ -149,7 +170,7 @@ struct alignas(8) PostingListStream
             chassert(!lazy_posting_stream);
             memcpy(embedded_postings, other.embedded_postings, doc_count * sizeof(UInt32));
         }
-        other.type = -2;
+        other.type = 0;
         other.doc_count = 0;
     }
 
@@ -167,7 +188,7 @@ struct alignas(8) PostingListStream
                 memcpy(embedded_postings, other.embedded_postings, doc_count * sizeof(UInt32));
             }
 
-            other.type = -2;
+            other.type = 0;
             other.doc_count = 0;
         }
         return *this;
@@ -191,6 +212,8 @@ struct PostingListData
     {
         PostingListWriter writer;
         PostingListStream stream;
+        /// TODO(amos):
+        /// We should introduce another variant which holds a single stream that can do seek but cannot merge
 
         Storage() { }
         ~Storage() { }

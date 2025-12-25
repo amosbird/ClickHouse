@@ -59,6 +59,11 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
         }
     }
 
+    initializeIndexStreams();
+}
+
+void MergeTreeReaderTextIndex::initializeIndexStreams()
+{
     auto data_part = getDataPart();
     auto substreams = index.index->getSubstreams();
 
