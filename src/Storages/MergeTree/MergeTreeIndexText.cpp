@@ -287,6 +287,7 @@ void MergeTreeIndexGranuleText::deserializeBinaryWithMultipleStreams(MergeTreeIn
 
     readSparseIndex(*index_stream, state);
     analyzeDictionary(*dictionary_stream, state);
+    sparse_index.reset();
     readPostingsForRareTokens(*postings_stream, state);
 }
 
@@ -407,7 +408,7 @@ void MergeTreeIndexGranuleText::readPostingsForRareTokens(MergeTreeIndexReaderSt
 size_t MergeTreeIndexGranuleText::memoryUsageBytes() const
 {
     return sizeof(*this)
-        + sparse_index->memoryUsageBytes()
+        + (sparse_index ? sparse_index->memoryUsageBytes() : 0)
         + remaining_tokens.capacity() * sizeof(*remaining_tokens.begin())
         + rare_tokens_postings.capacity() * sizeof(*rare_tokens_postings.begin());
 }

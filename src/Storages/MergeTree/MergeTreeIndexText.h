@@ -153,18 +153,6 @@ struct PostingsSerialization
     static PostingListPtr deserialize(ReadBuffer & istr, UInt64 header, UInt64 cardinality);
 };
 
-/// Closed range of rows.
-struct RowsRange
-{
-    size_t begin;
-    size_t end;
-
-    RowsRange() = default;
-    RowsRange(size_t begin_, size_t end_) : begin(begin_), end(end_) {}
-
-    bool intersects(const RowsRange & other) const;
-};
-
 /// Stores information about posting list for a token.
 struct TokenPostingsInfo
 {
@@ -240,7 +228,7 @@ struct TextIndexSerialization
 
 
 /// Text index granule created on reading of the index.
-struct MergeTreeIndexGranuleText final : public IMergeTreeIndexGranule
+struct MergeTreeIndexGranuleText : public IMergeTreeIndexGranule
 {
 public:
     using TokenToPostingsInfosMap = absl::flat_hash_map<std::string_view, TokenPostingsInfo>;
@@ -262,7 +250,7 @@ public:
 
     const TokenToPostingsInfosMap & getRemainingTokens() const { return remaining_tokens; }
     PostingListPtr getPostingsForRareToken(std::string_view token) const;
-    void setCurrentRange(RowsRange range) { current_range = std::move(range); }
+    void setCurrentRange(RowsRange range) override { current_range = std::move(range); }
     void resetAfterAnalysis();
 
     static PostingListPtr readPostingsBlock(
@@ -271,7 +259,7 @@ public:
         const TokenPostingsInfo & token_info,
         size_t block_idx);
 
-private:
+protected:
     void readSparseIndex(MergeTreeIndexReaderStream & stream, MergeTreeIndexDeserializationState & state);
     /// Reads dictionary blocks and analyzes them for tokens.
     void analyzeDictionary(MergeTreeIndexReaderStream & stream, MergeTreeIndexDeserializationState & state);
