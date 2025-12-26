@@ -42,14 +42,16 @@ public:
     void prefetchBeginOfRange(Priority priority) override;
 
 protected:
-    virtual void initializeIndexStreams();
+    void initializeIndexStreams();
 
     void createEmptyColumns(Columns & columns) const;
 
     /// Returns postings for all all tokens required for the given mark.
     PostingsMap readPostingsIfNeeded(size_t mark);
+    /// Returns postings for given block of the given token required for the given range.
+    virtual PostingListPtr readPostingsBlockForToken(std::string_view token, const TokenPostingsInfo & token_info, size_t block_idx);
     /// Returns postings for all blocks of the given token required for the given range.
-    virtual std::vector<PostingListPtr> readPostingsBlocksForToken(std::string_view token, const TokenPostingsInfo & token_info, const RowsRange & range);
+    std::vector<PostingListPtr> readPostingsBlocksForToken(std::string_view token, const TokenPostingsInfo & token_info, const RowsRange & range);
     /// Removes blocks with max value less than the given range.
     void cleanupPostingsBlocks(const RowsRange & range);
 

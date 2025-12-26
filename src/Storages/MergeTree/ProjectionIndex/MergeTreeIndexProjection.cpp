@@ -11,20 +11,12 @@
 #include <Storages/MergeTree/TextIndexCache.h>
 #include <Storages/ProjectionsDescription.h>
 
-namespace ProfileEvents
-{
-extern const Event TextIndexReadPostings;
-}
-
 namespace DB
 {
 
 namespace ErrorCodes
 {
-extern const int LOGICAL_ERROR;
-extern const int INCORRECT_QUERY;
-extern const int INCORRECT_NUMBER_OF_COLUMNS;
-extern const int CORRUPTED_DATA;
+    extern const int LOGICAL_ERROR;
 }
 
 MergeTreeIndexGranuleProjection::MergeTreeIndexGranuleProjection(const String & projection_name_)
@@ -229,8 +221,8 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
         }
     }
 
-    LargePostingListReaderStreamPtr posting_stream = reader->getProjectionIndexPostingStreamPtr();
-    chassert(posting_stream);
+    large_posting_stream = reader->getProjectionIndexPostingStreamPtr();
+    chassert(large_posting_stream);
 
     const String & data_path = state.part.getDataPartStorage().getFullPath();
     for (const auto & [token, token_info] : remaining_tokens)
@@ -243,14 +235,13 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
         {
             const auto load_postings = [&]() -> PostingListPtr
             {
-                /// The decoder requires the last doc id preceding this block to
-                /// reconstruct absolute doc ids from deltas.
-                /// Use (range.begin - 1) as the previous doc id when available.
+                /// The decoder requires the last doc id preceding this block to reconstruct absolute doc ids from
+                /// deltas. Use (range.begin - 1) as the previous doc id when available.
                 UInt32 last_doc_id = token_info.ranges[0].begin;
                 if (last_doc_id > 0)
                     --last_doc_id;
                 return ReaderStreamEntry::materializeLargeBlockIntoBitmap(
-                    *posting_stream, last_doc_id, token_info.offsets[0].doc_count, token_info.offsets[0].offset);
+                    *large_posting_stream, last_doc_id, token_info.offsets[0].doc_count, token_info.offsets[0].offset);
             };
 
             auto hash = TextIndexPostingsCache::hash(data_path, part->name, token_info.offsets[0].offset);

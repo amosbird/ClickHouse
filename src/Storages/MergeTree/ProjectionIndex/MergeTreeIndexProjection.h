@@ -9,14 +9,15 @@ struct ProjectionDescription;
 
 struct MergeTreeIndexGranuleProjection final : public MergeTreeIndexGranuleText
 {
-public:
     explicit MergeTreeIndexGranuleProjection(const String & projection_name_);
     ~MergeTreeIndexGranuleProjection() override;
 
     void deserializeBinaryWithMultipleStreams(MergeTreeIndexInputStreams & streams, MergeTreeIndexDeserializationState & state) override;
 
-private:
     String projection_name;
+
+    /// TODO(amos): Do we need per-token stream to reduce seek?
+    LargePostingListReaderStreamPtr large_posting_stream;
 };
 
 class MergeTreeIndexProjection final : public IMergeTreeIndex
