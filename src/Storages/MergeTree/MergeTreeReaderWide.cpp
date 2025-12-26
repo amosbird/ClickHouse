@@ -619,4 +619,12 @@ void MergeTreeReaderWide::readData(
         column, rows_offset, max_rows_to_read, deserialize_settings, deserialize_state, &cache);
 }
 
+LargePostingListReaderStreamPtr MergeTreeReaderWide::getProjectionIndexPostingStreamPtr() const
+{
+    auto it = large_posting_streams.find("posting_list");
+    if (it == large_posting_streams.end())
+        return nullptr;
+    return it->second;
+}
+
 }

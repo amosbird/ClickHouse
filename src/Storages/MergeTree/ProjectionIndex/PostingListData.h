@@ -79,6 +79,33 @@ struct LargePostingBlockMeta
     UInt32 last_doc_id;
     UInt32 doc_count;
     UInt64 offset;
+
+    /// Default constructor (required by std::vector, resize, etc.)
+    LargePostingBlockMeta() noexcept
+        : last_doc_id(0)
+        , doc_count(0)
+        , offset(0)
+    {
+    }
+
+    /// Construct with offset only
+    LargePostingBlockMeta(UInt64 offset_) noexcept // NOLINT
+        : last_doc_id(0)
+        , doc_count(0)
+        , offset(offset_)
+    {
+    }
+
+    /// Fully initialized constructor
+    LargePostingBlockMeta(UInt32 last_doc_id_, UInt32 doc_count_, UInt64 offset_) noexcept
+        : last_doc_id(last_doc_id_)
+        , doc_count(doc_count_)
+        , offset(offset_)
+    {
+    }
+
+    /// Implicit conversion to offset (INTENTIONALLY implicit)
+    operator UInt64() const noexcept { return offset; } // NOLINT
 };
 
 using LargePostingBlockMetas = std::vector<LargePostingBlockMeta>;

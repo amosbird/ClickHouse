@@ -19,6 +19,9 @@ class ASTProjectionDeclaration;
 
 struct IndexDescription;
 
+struct IMergeTreeIndex;
+using MergeTreeIndexPtr = std::shared_ptr<const IMergeTreeIndex>;
+
 /// Base interface for projection index implementations.
 class IProjectionIndex
 {
@@ -36,6 +39,8 @@ public:
         = 0;
 
     virtual const IndexDescription & getIndexDescription() const;
+
+    virtual MergeTreeIndexPtr getIndex() const { return nullptr; }
 };
 
 using ProjectionIndexPtr = std::shared_ptr<IProjectionIndex>;

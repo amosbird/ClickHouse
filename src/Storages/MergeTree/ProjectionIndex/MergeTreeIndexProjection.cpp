@@ -27,9 +27,9 @@ extern const int INCORRECT_NUMBER_OF_COLUMNS;
 extern const int CORRUPTED_DATA;
 }
 
-MergeTreeIndexGranuleProjection::MergeTreeIndexGranuleProjection(const ProjectionDescription & projection_)
+MergeTreeIndexGranuleProjection::MergeTreeIndexGranuleProjection(const String & projection_name_)
     : MergeTreeIndexGranuleText({})
-    , projection(projection_)
+    , projection_name(projection_name_)
 {
 }
 
@@ -41,7 +41,7 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
     MergeTreeDataPartPtr part;
     for (const auto & [name, projection_part] : state.part.getProjectionParts())
     {
-        if (name == projection.name)
+        if (name == projection_name)
         {
             part = projection_part;
             break;
@@ -53,7 +53,7 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
         throw Exception(
             ErrorCodes::LOGICAL_ERROR,
             "Projection part '{}' not found while deserializing projection index in part '{}'",
-            projection.name,
+            projection_name,
             state.part.name);
     }
 
@@ -68,16 +68,51 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
 
     for (const auto & token : all_search_tokens)
     {
-        size_t mark = sparse_index.upperBound(token);
+        /// upperBound returns the first position with value > token
+        size_t pos = sparse_index.upperBound(token);
 
-        if (mark == 0 || mark == sparse_index.size())
+        /// All sparse index values are greater than token: no mark satisfies (mark_value <= token)
+        if (pos == 0)
         {
             if (global_search_mode == TextSearchMode::All)
                 return;
             continue;
         }
 
-        --mark;
+        /// Convert upper_bound result to the last index with value <= token
+        /// Normally this is pos - 1
+        size_t mark = pos - 1;
+
+        /// If upperBound points past the end, the token is greater than or equal to
+        /// the last indexed token.
+        ///
+        /// Two cases:
+        /// 1) The token is strictly greater than all indexed tokens:
+        ///    - No granule can possibly contain it.
+        ///    - In ALL mode, we can early-exit; otherwise skip this token.
+        /// 2) The token is equal to the last indexed token:
+        ///    - upperBound() returns size(), but the token still belongs to
+        ///      the last granule.
+        ///    - If the part has a final mark, we must seek to (last_mark - 1)
+        ///      to read the last granule.
+        if (pos == sparse_index.size())
+        {
+            if (sparse_index.tokens->getDataAt(mark) == token)
+            {
+                /// Special handling for the last mark:
+                /// upperBound() lands past the end, but the matching granule
+                /// is the one before the final mark.
+                if (part->index_granularity->hasFinalMark())
+                    --mark;
+            }
+            else
+            {
+                if (global_search_mode == TextSearchMode::All)
+                    return;
+                continue;
+            }
+        }
+
         mark_to_tokens[mark].emplace_back(token);
     }
 
@@ -103,20 +138,17 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
         ValueSizeMap{},
         ReadBufferFromFileBase::ProfileCallback{});
 
-    /// TODO(amos): here we shoud get LargePostingListReaderStream from reader so that it can be used later to fill in rare_tokens_postings
-
     std::optional<size_t> prev_mark;
     const auto get_dictionary_block = [&](size_t mark)
     {
         const auto load_dictionary_block = [&] -> TextIndexDictionaryBlockCacheEntryPtr
         {
             const size_t rows_to_read = part->index_granularity->getMarkRows(mark);
-
             Columns result;
             result.resize(cols.size());
             size_t rows_read = reader->readRows(
                 mark,
-                part->getMarksCount(),
+                sparse_index.size(),
                 prev_mark && *prev_mark == mark - 1,
                 rows_to_read,
                 /*rows_offset=*/0,
@@ -129,6 +161,7 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
             const ColumnAggregateFunction & posting_column = assert_cast<const ColumnAggregateFunction &>(*result[1]);
             const auto & data = posting_column.getData();
             const size_t rows = data.size();
+            chassert(rows_read == rows);
             std::vector<TokenPostingsInfo> token_infos;
             token_infos.reserve(rows);
 
@@ -139,12 +172,12 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
                 const auto & stream = posting_list_data->stream();
 
                 TokenPostingsInfo info;
-                // info.header =
                 info.cardinality = stream.doc_count;
                 if (stream.doc_count <= MAX_SIZE_OF_EMBEDDED_POSTINGS)
                 {
                     info.embedded_postings = std::make_shared<PostingList>();
                     info.embedded_postings->addMany(info.cardinality, stream.embedded_postings);
+                    info.ranges.emplace_back(stream.embedded_postings[0], stream.embedded_postings[info.cardinality - 1]);
                 }
                 else
                 {
@@ -156,18 +189,17 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
                     size_t num_large_blocks = entry.large_posting_blocks.size();
                     chassert(num_large_blocks > 0);
 
-                    info.offsets.reserve(num_large_blocks - 1);
-                    info.ranges.reserve(num_large_blocks - 1);
-                    UInt32 last_doc_id = entry.large_posting_blocks[0].last_doc_id;
-                    for (size_t b = 1; b < num_large_blocks; ++b)
+                    info.offsets.reserve(num_large_blocks);
+                    info.ranges.reserve(num_large_blocks);
+                    UInt32 range_begin = entry.first_doc_id;
+                    for (size_t b = 0; b < num_large_blocks; ++b)
                     {
-                        info.offsets.push_back(entry.large_posting_blocks[b].offset);
-                        info.ranges.emplace_back(last_doc_id, entry.large_posting_blocks[b].last_doc_id);
-                        last_doc_id = entry.large_posting_blocks[b].last_doc_id;
+                        info.offsets.push_back(entry.large_posting_blocks[b]);
+                        info.ranges.emplace_back(range_begin, entry.large_posting_blocks[b].last_doc_id);
+                        range_begin = entry.large_posting_blocks[b].last_doc_id + 1;
                     }
                 }
 
-                /// TODO(amos): here we should extend info to store LargePostingBlockMeta so that posting list stream can be decoded
                 token_infos.emplace_back(std::move(info));
             }
 
@@ -185,7 +217,6 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
         for (const auto & token : tokens)
         {
             auto * token_info = dictionary_block->getTokenInfo(token);
-
             if (token_info)
             {
                 remaining_tokens.emplace(token, *token_info);
@@ -197,48 +228,52 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
             }
         }
     }
+
+    LargePostingListReaderStreamPtr posting_stream = reader->getProjectionIndexPostingStreamPtr();
+    chassert(posting_stream);
+
+    const String & data_path = state.part.getDataPartStorage().getFullPath();
+    for (const auto & [token, token_info] : remaining_tokens)
+    {
+        if (token_info.embedded_postings)
+        {
+            rare_tokens_postings.emplace(token, token_info.embedded_postings);
+        }
+        else if (token_info.offsets.size() == 1)
+        {
+            const auto load_postings = [&]() -> PostingListPtr
+            {
+                /// The decoder requires the last doc id preceding this block to
+                /// reconstruct absolute doc ids from deltas.
+                /// Use (range.begin - 1) as the previous doc id when available.
+                UInt32 last_doc_id = token_info.ranges[0].begin;
+                if (last_doc_id > 0)
+                    --last_doc_id;
+                return ReaderStreamEntry::materializeLargeBlockIntoBitmap(
+                    *posting_stream, last_doc_id, token_info.offsets[0].doc_count, token_info.offsets[0].offset);
+            };
+
+            auto hash = TextIndexPostingsCache::hash(data_path, part->name, token_info.offsets[0].offset);
+            rare_tokens_postings.emplace(token, condition_text.postingsCache()->getOrSet(hash, load_postings));
+        }
+    }
 }
 
-// PostingListPtr MergeTreeIndexGranuleProjection::readPostingsBlock(
-//     MergeTreeIndexReaderStream & stream, MergeTreeIndexDeserializationState & state, const TokenPostingsInfo & token_info, size_t block_idx)
-// {
-//     auto * data_buffer = stream.getDataBuffer();
-
-//     const String & data_path = state.part.getDataPartStorage().getFullPath();
-//     const String & index_name = state.index.getFileName();
-//     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*state.condition);
-
-//     const auto load_postings = [&]() -> PostingListPtr
-//     {
-//         ProfileEvents::increment(ProfileEvents::TextIndexReadPostings);
-//         stream.seekToMark({token_info.offsets[block_idx], 0});
-//         return PostingsSerialization::deserialize(*data_buffer, token_info.header, token_info.cardinality);
-//     };
-
-//     auto hash = TextIndexPostingsCache::hash(data_path, index_name, token_info.offsets[block_idx]);
-//     return condition_text.postingsCache()->getOrSet(hash, load_postings);
-// }
-
-MergeTreeIndexProjection::MergeTreeIndexProjection(const ProjectionDescription & projection_)
-    : IMergeTreeIndex(
-          [&]
-          {
-              if (!projection_.index)
-                  throw Exception(ErrorCodes::LOGICAL_ERROR, "Projection index is not initialized");
-              return projection_.index->getIndexDescription();
-          }())
-    , projection(projection_)
+namespace
 {
-    if (const auto * projection_text_index = dynamic_cast<const ProjectionIndexText *>(projection_.index.get()))
-    {
-        text_index = projection_text_index->getTextIndex();
-        if (!text_index)
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "Text projection index is not initialized");
-    }
-    else
-    {
-        throw Exception(ErrorCodes::LOGICAL_ERROR, "MergeTreeIndexProjection expects a text projection index");
-    }
+const IndexDescription & getIndexDescriptionOrThrow(const ProjectionDescription & projection)
+{
+    if (!projection.index)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Projection index is not initialized");
+    return projection.index->getIndexDescription();
+}
+}
+
+MergeTreeIndexProjection::MergeTreeIndexProjection(
+    const ProjectionDescription & projection, std::shared_ptr<const MergeTreeIndexText> text_index_)
+    : IMergeTreeIndex(getIndexDescriptionOrThrow(projection))
+    , text_index(std::move(text_index_))
+{
 }
 
 MergeTreeIndexSubstreams MergeTreeIndexProjection::getSubstreams() const
@@ -251,7 +286,7 @@ MergeTreeIndexProjection::getDeserializedFormat(const MergeTreeDataPartChecksums
 {
     /// Projection index intentionally does not return any index streams here. It relies on the MergeTree part reader
     /// for deserialization instead.
-    if (checksums.files.contains(projection.name))
+    if (checksums.files.contains(index.name + ".proj"))
         return {1, {{}}};
 
     return {0 /*unknown*/, {}};
@@ -259,7 +294,7 @@ MergeTreeIndexProjection::getDeserializedFormat(const MergeTreeDataPartChecksums
 
 MergeTreeIndexGranulePtr MergeTreeIndexProjection::createIndexGranule() const
 {
-    return std::make_shared<MergeTreeIndexGranuleProjection>(projection);
+    return std::make_shared<MergeTreeIndexGranuleProjection>(index.name);
 }
 
 MergeTreeIndexAggregatorPtr MergeTreeIndexProjection::createIndexAggregator() const

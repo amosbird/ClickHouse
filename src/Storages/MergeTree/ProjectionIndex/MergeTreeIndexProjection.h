@@ -10,24 +10,25 @@ struct ProjectionDescription;
 struct MergeTreeIndexGranuleProjection final : public MergeTreeIndexGranuleText
 {
 public:
-    explicit MergeTreeIndexGranuleProjection(const ProjectionDescription & projection_);
+    explicit MergeTreeIndexGranuleProjection(const String & projection_name_);
     ~MergeTreeIndexGranuleProjection() override;
 
     void deserializeBinaryWithMultipleStreams(MergeTreeIndexInputStreams & streams, MergeTreeIndexDeserializationState & state) override;
 
 private:
-    const ProjectionDescription & projection;
+    String projection_name;
 };
 
 class MergeTreeIndexProjection final : public IMergeTreeIndex
 {
 public:
-    explicit MergeTreeIndexProjection(const ProjectionDescription & projection_);
+    explicit MergeTreeIndexProjection(const ProjectionDescription & projection, std::shared_ptr<const MergeTreeIndexText> text_index_);
 
     ~MergeTreeIndexProjection() override = default;
 
     bool supportsReadingOnParallelReplicas() const override { return true; }
     bool isTextIndex() const override { return true; }
+    bool isProjectionIndex() const override { return true; }
 
     MergeTreeIndexSubstreams getSubstreams() const override;
     MergeTreeIndexFormat
@@ -37,7 +38,6 @@ public:
     MergeTreeIndexAggregatorPtr createIndexAggregator() const override;
     MergeTreeIndexConditionPtr createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context) const override;
 
-    const ProjectionDescription & projection;
     std::shared_ptr<const MergeTreeIndexText> text_index;
 };
 

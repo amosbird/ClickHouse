@@ -528,4 +528,12 @@ bool MergeTreeReaderCompact::needSkipStream(size_t column_pos, const ISerializat
     return !is_offsets || columns_for_offsets[column_pos]->level < ISerialization::getArrayLevel(substream);
 }
 
+LargePostingListReaderStreamPtr MergeTreeReaderCompact::getProjectionIndexPostingStreamPtr() const
+{
+    auto it = large_posting_streams.find("posting_list");
+    if (it == large_posting_streams.end())
+        return nullptr;
+    return it->second;
+}
+
 }

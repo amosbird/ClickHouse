@@ -8,7 +8,7 @@
 namespace DB
 {
 
-class MergeTreeIndexText;
+class MergeTreeIndexProjection;
 
 class ProjectionIndexText : public IProjectionIndex
 {
@@ -38,14 +38,14 @@ public:
 
     const IndexDescription & getIndexDescription() const override;
 
-    std::shared_ptr<const MergeTreeIndexText> getTextIndex() const { return text_index; }
+    MergeTreeIndexPtr getIndex() const override;
 
 private:
     ASTPtr index_ast;
     String col_name;
     SortDescription sort_description;
     IndexDescription index_description;
-    std::shared_ptr<const MergeTreeIndexText> text_index;
+    std::shared_ptr<const MergeTreeIndexProjection> index;
 };
 
 }

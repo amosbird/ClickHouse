@@ -15,6 +15,7 @@
 #include <Storages/KeyDescription.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeIndexTextPreprocessor.h>
+#include <Storages/MergeTree/ProjectionIndex/MergeTreeIndexProjection.h>
 #include <Storages/MergeTree/ProjectionIndex/PostingListState.h>
 #include <Storages/ProjectionsDescription.h>
 #include <Storages/StorageInMemoryMetadata.h>
@@ -26,16 +27,16 @@ namespace DB
 
 namespace ErrorCodes
 {
-    extern const int BAD_ARGUMENTS;
-    extern const int NO_SUCH_COLUMN_IN_TABLE;
-    extern const int NOT_IMPLEMENTED;
+extern const int BAD_ARGUMENTS;
+extern const int NO_SUCH_COLUMN_IN_TABLE;
+extern const int NOT_IMPLEMENTED;
 }
 
 MergeTreeIndexPtr textIndexCreator(const IndexDescription & index);
 
 ProjectionIndexPtr ProjectionIndexText::create(const ASTProjectionDeclaration & proj)
 {
-    auto index_ast = std::make_shared<ASTIndexDeclaration>(proj.index->clone(), proj.type->clone(), "ProjectionIndexText");
+    auto index_ast = std::make_shared<ASTIndexDeclaration>(proj.index->clone(), proj.type->clone(), proj.name);
     index_ast->granularity = ASTIndexDeclaration::DEFAULT_INDEX_GRANULARITY;
 
     const ASTIdentifier * col_name_ast = proj.index->as<const ASTIdentifier>();
@@ -49,7 +50,7 @@ void ProjectionIndexText::fillProjectionDescription(
     ProjectionDescription & result, const IAST * /* index_expr */, const ColumnsDescription & columns, ContextPtr query_context) const
 {
     chassert(result.index.get() == this);
-    chassert(!text_index);
+    chassert(!index);
     if (!columns.has(col_name))
         throw Exception(ErrorCodes::NO_SUCH_COLUMN_IN_TABLE, "There is no column {} to build index", backQuoteIfNeed(col_name));
 
@@ -67,8 +68,8 @@ void ProjectionIndexText::fillProjectionDescription(
     ColumnsDescription index_columns{{index_col.name, type}};
     static_cast<ProjectionIndexText &>(*result.index).index_description
         = IndexDescription::getIndexFromAST(index_ast, index_columns, /* is_implicitly_created */ true, query_context);
-    static_cast<ProjectionIndexText &>(*result.index).text_index
-        = std::static_pointer_cast<const MergeTreeIndexText>(textIndexCreator(index_description));
+    static_cast<ProjectionIndexText &>(*result.index).index = std::make_shared<MergeTreeIndexProjection>(
+        result, std::static_pointer_cast<const MergeTreeIndexText>(textIndexCreator(index_description)));
 
     result.required_columns = {col_name, "_part_offset"};
     result.with_parent_part_offset = true;
@@ -101,6 +102,11 @@ void ProjectionIndexText::fillProjectionDescription(
 const IndexDescription & ProjectionIndexText::getIndexDescription() const
 {
     return index_description;
+}
+
+MergeTreeIndexPtr ProjectionIndexText::getIndex() const
+{
+    return std::static_pointer_cast<const IMergeTreeIndex>(index);
 }
 
 namespace
@@ -295,9 +301,9 @@ Block ProjectionIndexText::calculate(
         index_column = &low_card->getIndexes();
     }
 
-    auto agg = text_index->preprocessor;
+    auto agg = index->text_index->preprocessor;
     ColumnWithTypeAndName doc_column_with_type_and_name(doc_column, std::make_shared<DataTypeString>(), col_name);
-    auto [processed_column, offset] = text_index->preprocessor->processColumn(doc_column_with_type_and_name, 0, doc_column->size());
+    auto [processed_column, offset] = index->text_index->preprocessor->processColumn(doc_column_with_type_and_name, 0, doc_column->size());
 
     const auto * column_string = checkAndGetColumn<ColumnString>(processed_column.get());
     const auto * column_fixed_string = checkAndGetColumn<ColumnFixedString>(processed_column.get());
@@ -308,7 +314,7 @@ Block ProjectionIndexText::calculate(
     if (column_string)
     {
         tokenized_block = tokenize(
-            *text_index->token_extractor,
+            *index->text_index->token_extractor,
             *column_string,
             offsets,
             projection_desc.sample_block,
@@ -320,7 +326,7 @@ Block ProjectionIndexText::calculate(
     else
     {
         tokenized_block = tokenize(
-            *text_index->token_extractor,
+            *index->text_index->token_extractor,
             *column_fixed_string,
             offsets,
             projection_desc.sample_block,

@@ -43,6 +43,8 @@ public:
 
     void prefetchBeginOfRange(Priority priority) override;
 
+    LargePostingListReaderStreamPtr getProjectionIndexPostingStreamPtr() const override;
+
     using FileStreams = std::map<std::string, std::unique_ptr<MergeTreeReaderStream>>;
 
 private:

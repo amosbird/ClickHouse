@@ -35,6 +35,8 @@ public:
 
     bool canReadIncompleteGranules() const final { return false; }
 
+    LargePostingListReaderStreamPtr getProjectionIndexPostingStreamPtr() const override;
+
 protected:
     void fillColumnPositions();
 

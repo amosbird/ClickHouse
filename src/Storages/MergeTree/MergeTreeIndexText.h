@@ -2,6 +2,7 @@
 
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
+#include <Storages/MergeTree/ProjectionIndex/PostingListData.h>
 #include <Columns/IColumn.h>
 #include <Common/Logger.h>
 #include <Common/HashTable/HashMap.h>
@@ -158,7 +159,7 @@ struct TokenPostingsInfo
 {
     UInt64 header = 0;
     UInt32 cardinality = 0;
-    std::vector<UInt64> offsets;
+    std::vector<LargePostingBlockMeta> offsets;
     std::vector<RowsRange> ranges;
     PostingListPtr embedded_postings;
 

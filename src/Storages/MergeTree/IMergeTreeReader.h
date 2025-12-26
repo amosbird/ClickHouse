@@ -83,6 +83,8 @@ public:
 
     virtual void updateAllMarkRanges(const MarkRanges & ranges) { all_mark_ranges = ranges; }
 
+    virtual LargePostingListReaderStreamPtr getProjectionIndexPostingStreamPtr() const { return nullptr; }
+
 protected:
     /// Returns true if requested column is a subcolumn with offsets of Array which is part of Nested column.
     bool isSubcolumnOffsetsOfNested(const String & name_in_storage, const String & subcolumn_name) const;
