@@ -40,7 +40,7 @@ SELECT tokensForLikePattern('abc你好', 'standard');         -- ASCII then Unic
 SELECT tokensForLikePattern('，。你好', 'standard');        -- punctuation stop words skipped
 SELECT tokensForLikePattern('你好%世界', 'standard');       -- Unicode token with wildcards
 
-set allow_experimental_full_text_index = 1;
+set enable_full_text_index = 1;
 
 drop table if exists tab;
 
