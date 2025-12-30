@@ -189,7 +189,7 @@ Block tokenize(
                 if (data.empty())
                     continue;
 
-                forEachTokenPadded(
+                forEachToken(
                     extractor,
                     data.data(),
                     data.size(),
