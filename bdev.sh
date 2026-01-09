@@ -13,24 +13,27 @@ else
     bdir=build-$type
 fi
 
-export APUS_TOOLCHAIN_PATH=/tmp/gentoo/home/amos/toolchain
+export APUS_TOOLCHAIN_PATH=/tmp/gentoo/home/amos/toolchain-sysroot
 export PATH=${APUS_TOOLCHAIN_PATH}/bin:$PATH
+
+export MSAN_OPTIONS="halt_on_error=0:report_umrs=0"
 
 # thrift compiler has mem leak, which breaks asan build during code generation
 export ASAN_OPTIONS=detect_leaks=0
 
 case "$type" in
+dall)
+    configure() {
+        cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_RUST=0 ../src
+    }
+    ;;
 d)
     configure() {
         cmake \
            -DCMAKE_BUILD_TYPE=Debug \
-           -DENABLE_TESTS=0 \
-           -DENABLE_UTILS=0 \
-           -DENABLE_CLICKHOUSE_ALL=0 \
-           -DENABLE_CLICKHOUSE_SERVER=1 \
-           -DENABLE_CLICKHOUSE_CLIENT=1 \
-           -DENABLE_CLICKHOUSE_LOCAL=1 \
-           -DENABLE_CLICKHOUSE_BENCHMARK=1 \
+           -DDEBUG_O_LEVEL="0" \
+           -DENABLE_TESTS=1 \
+           -DENABLE_RUST=0 \
            ../src
     }
     ;;
@@ -38,29 +41,44 @@ a)
     configure() {
         cmake \
            -DSANITIZE=address \
-           -DENABLE_JEMALLOC=0 \
+           -DENABLE_RUST=0 \
            -DCMAKE_BUILD_TYPE=Debug \
+           -DDEBUG_O_LEVEL="0" \
+           -DENABLE_TESTS=1 \
+           ../src
+    }
+    ;;
+m)
+    configure() {
+        cmake \
+           -DSANITIZE=memory \
+           -DENABLE_RUST=0 \
+           -DCMAKE_BUILD_TYPE=Debug \
+           -DDEBUG_O_LEVEL="0" \
+           -DENABLE_TESTS=1 \
+           ../src
+    }
+    ;;
+u)
+    configure() {
+        cmake \
+           -DSANITIZE=undefined \
+           -DENABLE_RUST=0 \
+           -DENABLE_JEMALLOC=0 \
            -DENABLE_TESTS=0 \
            -DENABLE_UTILS=0 \
-           -DENABLE_CLICKHOUSE_ALL=0 \
-           -DENABLE_CLICKHOUSE_SERVER=1 \
-           -DENABLE_CLICKHOUSE_CLIENT=1 \
-           -DENABLE_CLICKHOUSE_LOCAL=1 \
-           -DENABLE_CLICKHOUSE_BENCHMARK=1 \
+           -DENABLE_SSH=0 \
+           -DENABLE_RUST=0 \
+           -DENABLE_AVRO=0 \
            ../src
     }
     ;;
 r)
     configure() {
         cmake \
+           -DENABLE_TESTS=1 \
+           -DENABLE_RUST=0 \
            -DENABLE_THINLTO=0 \
-           -DENABLE_TESTS=0 \
-           -DENABLE_UTILS=0 \
-           -DENABLE_CLICKHOUSE_ALL=0 \
-           -DENABLE_CLICKHOUSE_SERVER=1 \
-           -DENABLE_CLICKHOUSE_CLIENT=1 \
-           -DENABLE_CLICKHOUSE_LOCAL=1 \
-           -DENABLE_CLICKHOUSE_BENCHMARK=1 \
            ../src
     }
     ;;
@@ -92,7 +110,7 @@ if [ $rebuild -eq 1 ] || [ "$(basename "$0")" = "r" ]; then
     read -p "Rebuild from scratch is required (needed). Are you sure? [Enter to continue, Ctrl-C to quit]" -n 1 -r
     echo
 
-    rm -rf ./*
+    find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 
     configure
 elif [ "$(basename "$0")" = "f" ]; then
@@ -104,7 +122,7 @@ fi
 
 if [ "$(basename "$0")" = "bv" ]
 then
-    ninja -v
+    ninja -v -d keeprsp -k 0 clickhouse
 else
-    ninja
+    ninja -k 0 clickhouse
 fi

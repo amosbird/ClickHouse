@@ -1,234 +1,653 @@
-<?xml version="1.0"?>
-<yandex>
+<?xml version="1.0" encoding="utf-8"?>
+<clickhouse>
     <logger>
-        <level>trace</level>
-        <log>clickhouse-server.log</log>
-        <errorlog>clickhouse-server.err.log</errorlog>
-        <size>1000M</size>
+        <level>debug</level>
+        <log>clickhouse.log</log>
+        <errorlog>clickhouse.err.log</errorlog>
+        <size>500M</size>
         <count>10</count>
     </logger>
+
+    <url_scheme_mappers>
+        <s3>
+            <to>https://{bucket}.s3.amazonaws.com</to>
+        </s3>
+        <gs>
+            <to>https://{bucket}.storage.googleapis.com</to>
+        </gs>
+        <oss>
+            <to>https://{bucket}.oss.aliyuncs.com</to>
+        </oss>
+    </url_scheme_mappers>
 
     <core_dump>
         <size_limit>0</size_limit>
     </core_dump>
 
-    <user_files_path>/</user_files_path>
+    <user_files_path>/tmp/gentoo/home/amos/git/ClickHouse</user_files_path>
 
-    <dns_cache_update_period>10000000</dns_cache_update_period>
+    <heartbeat_port>9500</heartbeat_port>
+    <heartbeat_threads>1</heartbeat_threads>
+    <heartbeat_max_requests>5</heartbeat_max_requests>
+
+    <query_port>9800</query_port>
+    <query_threads>20</query_threads>
+    <query_max_requests>100</query_max_requests>
+
+    <insert_port>9700</insert_port>
+    <insert_threads>20</insert_threads>
+    <insert_max_requests>100</insert_max_requests>
+
+    <manage_port>9600</manage_port>
+    <manage_threads>5</manage_threads>
+    <manage_max_requests>5</manage_max_requests>
+
+    <dns_cache_update_period>600</dns_cache_update_period>
     <http_port>8123</http_port>
     <tcp_port>9000</tcp_port>
     <mysql_port>9004</mysql_port>
-
-    <!-- <https_port>8443</https_port> -->
     <tcp_ssl_port>9440</tcp_ssl_port>
-    <!-- <remap_executable>1</remap_executable> -->
+    <prometheus>
+        <endpoint>/metrics</endpoint>
+        <port>9363</port>
+        <metrics>true</metrics>
+        <events>true</events>
+        <asynchronous_metrics>true</asynchronous_metrics>
+    </prometheus>
     <mlock_executable>1</mlock_executable>
-    <!-- <max_server_memory_usage>10737418240</max_server_memory_usage> -->
-
-    <!-- Used with https_port and tcp_ssl_port. Full ssl options list: https://github.com/yandex/ClickHouse/blob/master/contrib/libpoco/NetSSL_OpenSSL/include/Poco/Net/SSLManager.h#L71 -->
-    <openSSL>
-        <server> <!-- Used for https server AND secure tcp port -->
-            <!-- openssl req -subj "/CN=localhost" -new -newkey rsa:2048 -days 365 -nodes -x509 -keyout /etc/clickhouse-server/server.key -out /etc/clickhouse-server/server.crt -->
-            <certificateFile>/data/ClickHouse/src/dbms/tests/integration/test_mysql_protocol/configs/server.crt</certificateFile>
-            <privateKeyFile>/data/ClickHouse/src/dbms/tests/integration/test_mysql_protocol/configs/server.key</privateKeyFile>
-            <!-- openssl dhparam -out /etc/clickhouse-server/dhparam.pem 4096 -->
-            <dhParamsFile>/data/ClickHouse/src/dbms/tests/integration/test_mysql_protocol/configs/dhparam.pem</dhParamsFile>
-            <verificationMode>none</verificationMode>
-            <loadDefaultCAFile>true</loadDefaultCAFile>
-            <cacheSessions>true</cacheSessions>
-            <disableProtocols>sslv2,sslv3</disableProtocols>
-            <preferServerCiphers>true</preferServerCiphers>
-        </server>
-
-        <client> <!-- Used for connecting to https dictionary source -->
-            <loadDefaultCAFile>true</loadDefaultCAFile>
-            <cacheSessions>true</cacheSessions>
-            <disableProtocols>sslv2,sslv3</disableProtocols>
-            <preferServerCiphers>true</preferServerCiphers>
-            <!-- Use for self-signed: <verificationMode>none</verificationMode> -->
-            <invalidCertificateHandler>
-                <!-- Use for self-signed: <name>AcceptCertificateHandler</name> -->
-                <name>RejectCertificateHandler</name>
-            </invalidCertificateHandler>
-        </client>
-    </openSSL>
-
-    <!-- Default root page on http[s] server. For example load UI from https://tabix.io/ when opening http://localhost:8123 -->
-    <!--
-        <http_server_default_response><![CDATA[<html ng-app="SMI2"><head><base href="http://ui.tabix.io/"></head><body><div ui-view="" class="content-ui"></div><script src="http://loader.tabix.io/master.js"></script></body></html>]]></http_server_default_response>
-    -->
-
-    <!-- Port for communication between replicas. Used for data exchange. -->
     <interserver_http_port>9009</interserver_http_port>
     <interserver_http_host>localhost</interserver_http_host>
-
-    <!-- Hostname that is used by other replicas to request this server.
-         If not specified, than it is determined analoguous to 'hostname -f' command.
-         This setting could be used to switch replication to another network interface.
-    -->
-    <!--
-        <interserver_http_host>example.yandex.ru</interserver_http_host>
-    -->
-
-    <!-- Listen specified host. use :: (wildcard IPv6 address), if you want to accept connections both with IPv4 and IPv6 from everywhere. -->
-    <!-- <listen_host>::</listen_host> -->
     <listen_host>0.0.0.0</listen_host>
-
     <max_connections>4096</max_connections>
     <keep_alive_timeout>10</keep_alive_timeout>
-
-    <!-- Maximum number of concurrent queries. -->
     <max_concurrent_queries>100</max_concurrent_queries>
-
-    <!-- Set limit on number of open files (default: maximum). This setting makes sense on Mac OS X because getrlimit() fails to retrieve
-         correct maximum value. -->
-    <!-- <max_open_files>262144</max_open_files> -->
-
-    <!-- Size of cache of uncompressed blocks of data, used in tables of MergeTree family.
-         In bytes. Cache is single for server. Memory is allocated only on demand.
-         Cache is used when 'use_uncompressed_cache' user setting turned on (off by default).
-         Uncompressed cache is advantageous only for very short queries and in rare cases.
-    -->
     <uncompressed_cache_size>8589934592</uncompressed_cache_size>
-
-    <!-- Approximate size of mark cache, used in tables of MergeTree family.
-         In bytes. Cache is single for server. Memory is allocated only on demand.
-         You should not lower this value.
-    -->
     <mark_cache_size>5368709120</mark_cache_size>
-
-
-    <!-- Path to data directory, with trailing slash. -->
-    <path>data</path>
-
-    <!-- Path to temporary data for processing hard queries. -->
-    <tmp_path>data/tmp/</tmp_path>
-
-    <access_control_path>data/acl/</access_control_path>
-
-    <custom_settings_prefixes>custom,amos</custom_settings_prefixes>
-
-    <!-- Path to configuration file with users, access rights, profiles of settings, quotas. -->
+    <index_mark_cache_size>5368709120</index_mark_cache_size>
+    <path>/tmp/gentoo/home/amos/git/ClickHouse/data</path>
+    <tmp_path>/tmp/gentoo/home/amos/git/ClickHouse/data/tmp/</tmp_path>
+    <access_control_path>/tmp/gentoo/home/amos/git/ClickHouse/data/acl/</access_control_path>
+    <custom_settings_prefixes>SQL_,amos</custom_settings_prefixes>
     <users_config>users.xml</users_config>
-
-    <!-- Default profile of settings.. -->
     <default_profile>default</default_profile>
-
-    <!-- Default database. -->
     <default_database>default</default_database>
+    <timezone>Asia/Shanghai</timezone>
 
-    <!-- Server time zone could be set here.
+    <zookeeper>
+        <node>
+            <host>localhost</host>
+            <port>32181</port>
+        </node>
+        <implementation>testkeeper</implementation>
+    </zookeeper>
 
-Time zone is used when converting between String and DateTime types,
-when printing DateTime in text formats and parsing DateTime from text,
-it is used in date and time related functions, if specific time zone was not passed as an argument.
+    <!-- <include from_zk="/background_pool_size" merge="true"/> -->
 
-Time zone is specified as identifier from IANA time zone database, like UTC or Africa/Abidjan.
-If not specified, system time zone at server startup is used.
+    <max_session_timeout>3600</max_session_timeout>
+    <default_session_timeout>60</default_session_timeout>
+    <shutdown_wait_unfinished>30</shutdown_wait_unfinished>
 
-Please note, that server could display time zone alias instead of specified name.
-Example: W-SU is an alias for Europe/Moscow and Zulu is an alias for UTC.
+    <!-- The maximum number of query processing threads, excluding threads for retrieving data from remote servers, allowed to run all queries.
+         This is not a hard limit. In case if the limit is reached the query will still get at least one thread to run.
+         Query can upscale to desired number of threads during execution if more threads become available.
     -->
-    <timezone>Europe/Moscow</timezone>
+    <concurrent_threads_soft_limit_num>0</concurrent_threads_soft_limit_num>
+    <concurrent_threads_soft_limit_ratio_to_cores>0</concurrent_threads_soft_limit_ratio_to_cores>
 
-    <!-- You can specify umask here (see "man umask"). Server will apply it on startup.
-         Number is always parsed as octal. Default umask is 027 (other users cannot read logs, data files, etc; group can only read).
+    <!-- Configure other thread pools: -->
+    <!--
+    <background_buffer_flush_schedule_pool_size>16</background_buffer_flush_schedule_pool_size>
+    <background_pool_size>16</background_pool_size>
+    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+    <background_merges_mutations_scheduling_policy>round_robin</background_merges_mutations_scheduling_policy>
+    <background_move_pool_size>8</background_move_pool_size>
+    <background_fetches_pool_size>8</background_fetches_pool_size>
+    <background_common_pool_size>8</background_common_pool_size>
+    <background_schedule_pool_size>128</background_schedule_pool_size>
+    <background_message_broker_schedule_pool_size>16</background_message_broker_schedule_pool_size>
+    <background_distributed_schedule_pool_size>16</background_distributed_schedule_pool_size>
     -->
-    <!-- <umask>022</umask> -->
 
-    <!-- Configuration of clusters that could be used in Distributed tables.
-         https://clickhouse.yandex/reference_en.html#Distributed
+    <!-- On memory constrained environments you may have to set this to value larger than 1.
+      -->
+    <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
+
+    <!-- Simple server-wide memory profiler. Collect a stack trace at every peak allocation step (in bytes).
+         Data will be stored in system.trace_log table with query_id = empty string.
+         Zero means disabled.
+      -->
+    <total_memory_profiler_step>4194304</total_memory_profiler_step>
+
+    <!-- If you enable the `min_bytes_to_use_mmap_io` setting,
+         the data in MergeTree tables can be read with mmap to avoid copying from kernel to userspace.
+         It makes sense only for large files and helps only if data reside in page cache.
+         To avoid frequent open/mmap/munmap/close calls (which are very expensive due to consequent page faults)
+         and to reuse mappings from several threads and queries,
+         the cache of mapped files is maintained. Its size is the number of mapped regions (usually equal to the number of mapped files).
+         The amount of data in mapped files can be monitored
+         in system.metrics, system.metric_log by the MMappedFiles, MMappedFileBytes metrics
+         and in system.asynchronous_metrics, system.asynchronous_metrics_log by the MMapCacheCells metric,
+         and also in system.events, system.processes, system.query_log, system.query_thread_log, system.query_views_log by the
+         CreatedReadBufferMMap, CreatedReadBufferMMapFailed, MMappedFileCacheHits, MMappedFileCacheMisses events.
+         Note that the amount of data in mapped files does not consume memory directly and is not accounted
+         in query or server memory usage - because this memory can be discarded similar to OS page cache.
+         The cache is dropped (the files are closed) automatically on removal of old parts in MergeTree,
+         also it can be dropped manually by the SYSTEM DROP MMAP CACHE query.
+      -->
+    <mmap_cache_size>1000</mmap_cache_size>
+
+    <!-- Cache size in bytes for compiled expressions.-->
+    <compiled_expression_cache_size>134217728</compiled_expression_cache_size>
+
+    <!-- Cache size in elements for compiled expressions.-->
+    <compiled_expression_cache_elements_size>10000</compiled_expression_cache_elements_size>
+
+    <!-- Query log. Used only for queries with setting log_queries = 1. -->
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY toYYYYMM(event_date)
+            ORDER BY (event_date, event_time)
+            TTL event_date + INTERVAL 12 MONTH DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+    </query_log>
+
+    <!-- Trace log. Stores stack traces collected by query profilers.
+         See query_profiler_real_time_period_ns and query_profiler_cpu_time_period_ns settings. -->
+    <trace_log>
+        <database>system</database>
+        <table>trace_log</table>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY toYYYYMM(event_date)
+            ORDER BY (event_date, event_time)
+            TTL event_date + INTERVAL 12 MONTH DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+    </trace_log>
+
+    <!-- Query thread log. Has information about all threads participated in query execution.
+         Used only for queries with setting log_query_threads = 1. -->
+    <query_thread_log>
+        <database>system</database>
+        <table>query_thread_log</table>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY toYYYYMM(event_date)
+            ORDER BY (event_date, event_time)
+            TTL event_date + INTERVAL 12 MONTH DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+    </query_thread_log>
+
+    <!-- Query views log. Has information about all dependent views associated with a query.
+         Used only for queries with setting log_query_views = 1. -->
+    <query_views_log>
+        <database>system</database>
+        <table>query_views_log</table>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY toYYYYMM(event_date)
+            ORDER BY (event_date, event_time)
+            TTL event_date + INTERVAL 12 MONTH DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+    </query_views_log>
+
+    <filesystem_cache_log>
+        <database>system</database>
+        <table>filesystem_cache_log</table>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY toYYYYMM(event_date)
+            ORDER BY (event_date, event_time)
+            TTL event_date + INTERVAL 12 MONTH DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+    </filesystem_cache_log>
+
+    <transactions_info_log>
+        <database>system</database>
+        <table>transactions_info_log</table>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY toYYYYMM(event_date)
+            ORDER BY (event_date, event_time)
+            TTL event_date + INTERVAL 12 MONTH DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+    </transactions_info_log>
+
+    <!-- Uncomment if use part log.
+         Part log contains information about all actions with parts in MergeTree tables (creation, deletion, merges, downloads).-->
+    <part_log>
+        <database>system</database>
+        <table>part_log</table>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY toYYYYMM(event_date)
+            ORDER BY (event_date, event_time)
+            TTL event_date + INTERVAL 12 MONTH DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+    </part_log>
+
+    <!-- Metric log contains rows with current values of ProfileEvents, CurrentMetrics collected with "collect_interval_milliseconds" interval. -->
+    <metric_log>
+        <database>system</database>
+        <table>metric_log</table>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY toYYYYMM(event_date)
+            ORDER BY (event_date, event_time)
+            TTL event_date + INTERVAL 12 MONTH DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+        <collect_interval_milliseconds>10000</collect_interval_milliseconds>
+    </metric_log>
+
+    <!--
+        Asynchronous metric log contains values of metrics from
+        system.asynchronous_metrics.
     -->
-    <remote_servers incl="clickhouse_remote_servers" >
-        <!-- Test only shard config for testing distributed storage -->
-        <local>
-            <shard>
-                <replica>
-                    <host>localhost</host>
-                    <port>9100</port>
-                </replica>
-            </shard>
-        </local>
-        <amos>
-            <shard>
-                <replica>
-                    <host>localhost</host>
-                    <port>9000</port>
-                </replica>
-            </shard>
-            <shard>
-                <replica>
-                    <host>localhost</host>
-                    <port>9000</port>
-                </replica>
-            </shard>
-        </amos>
-        <two>
-            <shard>
-                <replica>
-                    <host>127.0.0.2</host>
-                    <port>9000</port>
-                </replica>
-            </shard>
-            <shard>
-                <replica>
-                    <host>127.0.0.3</host>
-                    <port>9100</port>
-                </replica>
-            </shard>
-        </two>
-        <test_shard_localhost>
-            <shard>
-                <replica>
-                    <host>localhost</host>
-                    <port>9000</port>
-                </replica>
-            </shard>
-        </test_shard_localhost>
+    <asynchronous_metric_log>
+        <database>system</database>
+        <table>asynchronous_metric_log</table>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY toYYYYMM(event_date)
+            ORDER BY (event_date, event_time)
+            TTL event_date + INTERVAL 12 MONTH DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+    </asynchronous_metric_log>
+    <asynchronous_metrics_update_period_s>10</asynchronous_metrics_update_period_s>
+    <asynchronous_heavy_metrics_update_period_s>120</asynchronous_heavy_metrics_update_period_s>
 
-        <test_cluster_one_shard_two_replicas>
-           <shard>
-               <replica>
-                   <host>127.0.0.1</host>
-                   <port>9000</port>
-               </replica>
-               <replica>
-                   <host>127.0.0.2</host>
-                   <port>9000</port>
-               </replica>
-           </shard>
-        </test_cluster_one_shard_two_replicas>
+    <!--
+        OpenTelemetry log contains OpenTelemetry trace spans.
+    -->
+    <opentelemetry_span_log>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY toYYYYMM(finish_date)
+            ORDER BY (finish_date, finish_time_us, trace_id)
+            TTL finish_date + INTERVAL 12 MONTH DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+        <database>system</database>
+        <table>opentelemetry_span_log</table>
+    </opentelemetry_span_log>
 
-        <test_cluster_two_shards_different_databases>
-            <shard>
-                <replica>
-                    <default_database>shard_0</default_database>
-                    <host>localhost</host>
-                    <port>9000</port>
-                </replica>
-            </shard>
-            <shard>
-                <replica>
-                    <default_database>shard_1</default_database>
-                    <host>localhost</host>
-                    <port>9000</port>
-                </replica>
-            </shard>
-        </test_cluster_two_shards_different_databases>
-        <test_unavailable_shard>
-            <shard>
-                <replica>
-                    <host>localhost</host>
-                    <port>9000</port>
-                </replica>
-            </shard>
-            <shard>
-                <replica>
-                    <host>localhost</host>
-                    <port>1</port>
-                </replica>
-            </shard>
-        </test_unavailable_shard>
+    <!-- Crash log. Stores stack traces for fatal errors.
+         This table is normally empty. -->
+    <crash_log>
+        <database>system</database>
+        <table>crash_log</table>
+        <partition_by />
+    </crash_log>
+
+    <!-- Profiling on Processors level. -->
+    <processors_profile_log>
+        <database>system</database>
+        <table>processors_profile_log</table>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY toYYYYMM(event_date)
+            ORDER BY (event_date, event_time)
+            TTL event_date + INTERVAL 12 MONTH DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+    </processors_profile_log>
+
+    <background_schedule_pool_log>
+        <database>system</database>
+        <table>background_schedule_pool_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <max_size_rows>1048576</max_size_rows>
+        <reserved_size_rows>8192</reserved_size_rows>
+        <buffer_size_rows_flush_threshold>524288</buffer_size_rows_flush_threshold>
+        <flush_on_crash>false</flush_on_crash>
+        <!-- Only tasks longer then duration_threshold_ms will be logged. Zero means log everything -->
+        <duration_threshold_ms>0</duration_threshold_ms>
+    </background_schedule_pool_log>
+
+    <!-- Log of asynchronous inserts. It allows to check status
+         of insert query in fire-and-forget mode.
+    -->
+    <asynchronous_insert_log>
+        <database>system</database>
+        <table>asynchronous_insert_log</table>
+        <engine>
+            ENGINE MergeTree
+            PARTITION BY event_date
+            ORDER BY (event_date, event_time)
+            TTL event_date + INTERVAL 3 DAY DELETE
+            SETTINGS ttl_only_drop_parts = 1
+        </engine>
+    </asynchronous_insert_log>
+
+    <!-- <!-\- Backup/restore log. -->
+    <!-- -\-> -->
+    <backup_log>
+        <database>system</database>
+        <table>backup_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </backup_log>
+
+    <text_log>
+        <database>system</database>
+        <table>text_log</table>
+        <flush_interval_milliseconds>4000</flush_interval_milliseconds>
+    </text_log>
+
+    <!-- Uncomment if you want data to be compressed 30-100% better.
+         Don't do that if you just started using ClickHouse.
+      -->
+    <!-- <compression> -->
+    <!--     <!-\- Set of variants. Checked in order. Last matching case wins. If nothing matches, lz4 will be used. -\-> -->
+    <!--     <case> -->
+
+    <!--         <!-\- Conditions. All must be satisfied. Some conditions may be omitted. -\-> -->
+    <!--         <min_part_size>10000000000</min_part_size>        <!-\- Min part size in bytes. -\-> -->
+    <!--         <min_part_size_ratio>0.01</min_part_size_ratio>   <!-\- Min size of part relative to whole table size. -\-> -->
+
+    <!--         <!-\- What compression method to use. -\-> -->
+    <!--         <method>zstd</method> -->
+    <!--     </case> -->
+    <!-- </compression> -->
+
+    <http_handlers>
+        <rule>
+            <url>/qp</url>
+            <methods>GET</methods>
+            <handler>
+                <type>predefined_query_handler</type>
+                <query>
+                    SELECT concat(arrayStringConcat(arrayReverse(arrayMap(x -> demangle(addressToSymbol(x)), trace)), ';'), ' ', toString(count()))
+                    FROM system.trace_log
+                    WHERE (trace_type = 'CPU') AND (query_id = {id:String}) AND (event_date != (today() - 10000))
+                    GROUP BY trace
+                    FORMAT TSVRaw
+                </query>
+            </handler>
+        </rule>
+        <rule>
+            <url>/speedscope</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/gentoo/home/amos/git/ClickHouse/web/speedscope/index.html</response_content>
+                <content_type>text/html; charset=UTF-8</content_type>
+            </handler>
+        </rule>
+        <rule>
+            <url>/demangle-cpp.1768f4cc.js</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/gentoo/home/amos/git/ClickHouse/web/speedscope/demangle-cpp.1768f4cc.js</response_content>
+                <content_type>text/javascript; charset=UTF-8</content_type>
+            </handler>
+        </rule>
+        <rule>
+            <url>/reset.8c46b7a1.css</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/gentoo/home/amos/git/ClickHouse/web/speedscope/reset.8c46b7a1.css</response_content>
+                <content_type>text/css; charset=UTF-8</content_type>
+            </handler>
+        </rule>
+        <rule>
+            <url>/source-map.438fa06b.js</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/gentoo/home/amos/git/ClickHouse/web/speedscope/source-map.438fa06b.js</response_content>
+                <content_type>text/javascript; charset=UTF-8</content_type>
+            </handler>
+        </rule>
+        <rule>
+            <url>/speedscope.f27db165.js</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/gentoo/home/amos/git/ClickHouse/web/speedscope/speedscope.f27db165.js</response_content>
+                <content_type>text/javascript; charset=UTF-8</content_type>
+            </handler>
+        </rule>
+        <rule>
+            <url>/import.8ae8aa3d.js</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/gentoo/home/amos/git/ClickHouse/web/speedscope/import.8ae8aa3d.js</response_content>
+                <content_type>text/javascript; charset=UTF-8</content_type>
+            </handler>
+        </rule>
+        <rule>
+            <url>/jquery-3.6.0.min.js</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/gentoo/home/amos/git/ClickHouse/web/speedscope/jquery-3.6.0.min.js</response_content>
+                <content_type>text/javascript; charset=UTF-8</content_type>
+            </handler>
+        </rule>
+        <rule>
+            <url>/select2.min.js</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/gentoo/home/amos/git/ClickHouse/web/speedscope/select2.min.js</response_content>
+                <content_type>text/javascript; charset=UTF-8</content_type>
+            </handler>
+        </rule>
+        <rule>
+            <url>/select2.min.css</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/gentoo/home/amos/git/ClickHouse/web/speedscope/select2.min.css</response_content>
+                <content_type>text/css</content_type>
+            </handler>
+        </rule>
+        <rule>
+            <url>/favicon-16x16.f74b3187.png</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/gentoo/home/amos/git/ClickHouse/web/speedscope/favicon-16x16.f74b3187.png</response_content>
+                <content_type>image/png</content_type>
+            </handler>
+        </rule>
+        <rule>
+            <url>/favicon-32x32.bc503437.png</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/gentoo/home/amos/git/ClickHouse/web/speedscope/favicon-32x32.bc503437.png</response_content>
+                <content_type>image/png</content_type>
+            </handler>
+        </rule>
+        <rule>
+            <url>/f1</url>
+            <methods>GET</methods>
+            <handler>
+                <type>static</type>
+                <response_content>file:///tmp/a.txt</response_content>
+            </handler>
+        </rule>
+        <defaults/>
+    </http_handlers>
+
+    <!-- Configuration for the query cache -->
+    <query_cache>
+        <max_size_in_bytes>1073741824</max_size_in_bytes>
+        <max_entries>1024</max_entries>
+        <max_entry_size_in_bytes>1048576</max_entry_size_in_bytes>
+        <max_entry_size_in_rows>30000000</max_entry_size_in_rows>
+    </query_cache>
+
+    <user_defined_executable_functions_config>function_config.xml</user_defined_executable_functions_config>
+
+    <storage_configuration>
+        <disks>
+            <s3_disk>
+                <type>s3</type>
+                <path>s3_disk/</path>
+                <endpoint>http://localhost:11111/test/s3/</endpoint>
+                <access_key_id>clickhouse</access_key_id>
+                <secret_access_key>clickhouse</secret_access_key>
+                <request_timeout_ms>20000</request_timeout_ms>
+            </s3_disk>
+            <s3_plain_disk>
+                <type>s3_plain</type>
+                <endpoint>http://localhost:11111/test/s3_plain/</endpoint>
+                <access_key_id>clickhouse</access_key_id>
+                <secret_access_key>clickhouse</secret_access_key>
+            </s3_plain_disk>
+            <s3_cache>
+                <type>cache</type>
+                <disk>s3_disk</disk>
+                <path>s3_cache/</path>
+                <max_size>209715200</max_size>
+                <max_file_segment_size>5Mi</max_file_segment_size>
+                <cache_on_write_operations>1</cache_on_write_operations>
+                <cache_policy>LRU</cache_policy>
+                <slru_size_ratio>0.3</slru_size_ratio>
+                <allow_dynamic_cache_resize>1</allow_dynamic_cache_resize>
+                <keep_free_space_size_ratio>0.15</keep_free_space_size_ratio>
+                <keep_free_space_elements_ratio>0.15</keep_free_space_elements_ratio>
+                <background_download_queue_size_limit>50</background_download_queue_size_limit>
+                <load_metadata_asynchronously>0</load_metadata_asynchronously>
+            </s3_cache>
+            <s3_cache_02933>
+                <type>cache</type>
+                <disk>s3_disk</disk>
+                <path>s3_cache_02933/</path>
+                <max_size>128Mi</max_size>
+                <cache_on_write_operations>1</cache_on_write_operations>
+                <background_download_threads>0</background_download_threads>
+                <background_download_queue_size_limit>0</background_download_queue_size_limit>
+                <load_metadata_asynchronously>0</load_metadata_asynchronously>
+            </s3_cache_02933>
+            <!-- local disks -->
+            <local_disk>
+                <type>object_storage</type>
+                <object_storage_type>local</object_storage_type>
+                <path>local_disk/</path>
+            </local_disk>
+            <local_disk_2>
+                <type>object_storage</type>
+                <object_storage_type>local_blob_storage</object_storage_type>
+                <path>local_disk_2/</path>
+            </local_disk_2>
+            <local_disk_3>
+                <type>local_blob_storage</type>
+                <path>local_disk_3/</path>
+            </local_disk_3>
+            <!-- cache for local disks -->
+            <local_cache>
+                <type>cache</type>
+                <disk>local_disk</disk>
+                <path>local_cache/</path>
+                <max_size>22548578304</max_size>
+                <cache_policy>LRU</cache_policy>
+                <cache_on_write_operations>1</cache_on_write_operations>
+            </local_cache>
+            <local_cache_2>
+                <type>cache</type>
+                <disk>local_disk</disk>
+                <path>local_cache_2/</path>
+                <max_size>22548578304</max_size>
+            </local_cache_2>
+            <local_cache_3>
+                <type>cache</type>
+                <disk>local_disk_3</disk>
+                <path>local_cache_3/</path>
+                <max_size>22548578304</max_size>
+                <cache_on_write_operations>1</cache_on_write_operations>
+            </local_cache_3>
+            <!-- multi layer cache -->
+            <s3_cache_multi>
+                <type>cache</type>
+                <disk>s3_cache</disk>
+                <path>s3_cache_multi/</path>
+                <max_size>22548578304</max_size>
+            </s3_cache_multi>
+            <s3_cache_multi_2>
+                <type>cache</type>
+                <disk>s3_cache_multi</disk>
+                <path>s3_cache_multi_2/</path>
+                <max_size>22548578304</max_size>
+            </s3_cache_multi_2>
+            <s3_no_cache>
+                <type>s3</type>
+                <endpoint>http://localhost:11111/test/special/</endpoint>
+                <access_key_id>clickhouse</access_key_id>
+                <secret_access_key>clickhouse</secret_access_key>
+                <s3_check_objects_after_upload>0</s3_check_objects_after_upload>
+            </s3_no_cache>
+        </disks>
+        <policies>
+            <local_remote>
+                <volumes>
+                    <local><disk>default</disk></local>
+                    <remote><disk>s3_disk</disk></remote>
+                </volumes>
+            </local_remote>
+            <s3_cache>
+                <volumes>
+                    <main>
+                        <disk>s3_cache</disk>
+                    </main>
+                </volumes>
+            </s3_cache>
+            <s3_no_cache>
+                <volumes>
+                    <main>
+                        <disk>s3_no_cache</disk>
+                    </main>
+                </volumes>
+            </s3_no_cache>
+            <s3_cache_multi>
+                <volumes>
+                    <main>
+                        <disk>s3_cache_multi_2</disk>
+                    </main>
+                </volumes>
+            </s3_cache_multi>
+            <local_cache>
+                <volumes>
+                    <main>
+                        <disk>local_cache</disk>
+                    </main>
+                </volumes>
+            </local_cache>
+            <local_cache_2>
+                <volumes>
+                    <main>
+                        <disk>local_cache_2</disk>
+                    </main>
+                </volumes>
+            </local_cache_2>
+            <local_cache_3>
+                <volumes>
+                    <main>
+                        <disk>local_cache_3</disk>
+                    </main>
+                </volumes>
+            </local_cache_3>
+        </policies>
+    </storage_configuration>
+    <remote_servers>
         <test_shard_localhost>
             <shard>
                 <replica>
@@ -238,6 +657,238 @@ Example: W-SU is an alias for Europe/Moscow and Zulu is an alias for UTC.
             </shard>
         </test_shard_localhost>
         <test_cluster_two_shards>
+            <shard>
+                <replica>
+                    <host>127.0.0.1</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <replica>
+                    <host>127.0.0.2</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </test_cluster_two_shards>
+        <test_cluster_two_shards_different_databases>
+             <shard>
+                 <replica>
+                     <default_database>shard_0</default_database>
+                     <host>localhost</host>
+                     <port>9000</port>
+                 </replica>
+             </shard>
+             <shard>
+                 <replica>
+                     <default_database>shard_1</default_database>
+                     <host>localhost</host>
+                     <port>9000</port>
+                 </replica>
+             </shard>
+        </test_cluster_two_shards_different_databases>
+        <test_cluster_one_shard_two_replicas>
+             <shard>
+                 <replica>
+                     <host>127.0.0.1</host>
+                     <port>9000</port>
+                 </replica>
+                 <replica>
+                     <host>127.0.0.2</host>
+                     <port>9000</port>
+                 </replica>
+             </shard>
+        </test_cluster_one_shard_two_replicas>
+        <test_cluster_two_replicas_different_databases>
+             <shard>
+                 <replica>
+                     <default_database>shard_0</default_database>
+                     <host>localhost</host>
+                     <port>9000</port>
+                 </replica>
+                 <replica>
+                     <default_database>shard_1</default_database>
+                     <host>localhost</host>
+                     <port>9000</port>
+                 </replica>
+             </shard>
+        </test_cluster_two_replicas_different_databases>
+        <test_cluster_interserver_secret>
+            <secret>123457</secret>
+            <shard>
+                <replica>
+                    <host>127.0.0.1</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <replica>
+                    <host>127.0.0.2</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </test_cluster_interserver_secret>
+        <test_cluster_two_shards_different_databases_with_local>
+            <shard>
+                <replica>
+                    <host>127.0.0.1</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <replica>
+                    <default_database>shard_1</default_database>
+                    <host>127.0.0.2</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </test_cluster_two_shards_different_databases_with_local>
+        <parallel_replicas>
+            <shard>
+                <internal_replication>false</internal_replication>
+                <replica>
+                    <host>127.0.0.1</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.2</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.3</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.4</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.5</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.6</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.7</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.8</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.9</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.10</host>
+                    <port>9000</port>
+                </replica>
+                <!-- Unavailable replica -->
+                <replica>
+                    <host>127.0.0.11</host>
+                    <port>1234</port>
+                </replica>
+            </shard>
+        </parallel_replicas>
+        <test_cluster_1_shard_3_replicas_1_unavailable>
+            <shard>
+                <internal_replication>false</internal_replication>
+                <replica>
+                    <host>127.0.0.1</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.2</host>
+                    <port>9000</port>
+                </replica>
+                <!-- Unavailable replica -->
+                <replica>
+                    <host>127.0.0.3</host>
+                    <port>1234</port>
+                </replica>
+            </shard>
+        </test_cluster_1_shard_3_replicas_1_unavailable>
+        <test_cluster_one_shard_three_replicas_localhost>
+            <shard>
+                <internal_replication>false</internal_replication>
+                <replica>
+                    <host>127.0.0.1</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.2</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.3</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <!--shard>
+                <internal_replication>false</internal_replication>
+                <replica>
+                    <host>127.0.0.1</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.2</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.3</host>
+                    <port>9000</port>
+                </replica>
+            </shard-->
+        </test_cluster_one_shard_three_replicas_localhost>
+        <test_cluster_two_shard_three_replicas_localhost>
+            <shard>
+                <internal_replication>false</internal_replication>
+                <replica>
+                    <host>127.0.0.1</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.2</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.3</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <internal_replication>false</internal_replication>
+                <replica>
+                    <host>127.0.0.4</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.5</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.6</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </test_cluster_two_shard_three_replicas_localhost>
+        <test_cluster_two_shards_localhost>
+             <shard>
+                 <replica>
+                     <host>localhost</host>
+                     <port>9000</port>
+                 </replica>
+             </shard>
+             <shard>
+                 <replica>
+                     <host>localhost</host>
+                     <port>9000</port>
+                 </replica>
+             </shard>
+        </test_cluster_two_shards_localhost>
+        <test_cluster_two_shards_internal_replication>
             <shard>
                 <internal_replication>true</internal_replication>
                 <replica>
@@ -252,21 +903,7 @@ Example: W-SU is an alias for Europe/Moscow and Zulu is an alias for UTC.
                     <port>9000</port>
                 </replica>
             </shard>
-        </test_cluster_two_shards>
-        <test_cluster_two_shards_localhost>
-            <shard>
-                <replica>
-                    <host>localhost</host>
-                    <port>9000</port>
-                </replica>
-            </shard>
-            <shard>
-                <replica>
-                    <host>localhost</host>
-                    <port>9000</port>
-                </replica>
-            </shard>
-        </test_cluster_two_shards_localhost>
+        </test_cluster_two_shards_internal_replication>
         <test_shard_localhost_secure>
             <shard>
                 <replica>
@@ -276,281 +913,122 @@ Example: W-SU is an alias for Europe/Moscow and Zulu is an alias for UTC.
                 </replica>
             </shard>
         </test_shard_localhost_secure>
+        <test_unavailable_shard>
+            <shard>
+                <replica>
+                    <host>localhost</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <replica>
+                    <host>localhost</host>
+                    <port>1</port>
+                </replica>
+            </shard>
+        </test_unavailable_shard>
+        <default_parallel_replicas>
+            <shard>
+                <internal_replication>false</internal_replication>
+                <replica>
+                    <host>localhost</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.2</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>127.0.0.3</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </default_parallel_replicas>
+        <!-- <test_cluster_with_incorrect_pw> -->
+        <!--      <shard> -->
+        <!--          <internal_replication>true</internal_replication> -->
+        <!--          <replica> -->
+        <!--              <host>127.0.0.1</host> -->
+        <!--              <port>9000</port> -->
+        <!--              <!-\- password is incorrect -\-> -->
+        <!--              <password>foo</password> -->
+        <!--          </replica> -->
+        <!--          <replica> -->
+        <!--              <host>127.0.0.2</host> -->
+        <!--              <port>9000</port> -->
+        <!--              <!-\- password is incorrect -\-> -->
+        <!--              <password>foo</password> -->
+        <!--          </replica> -->
+        <!--      </shard> -->
+        <!--  </test_cluster_with_incorrect_pw> -->
     </remote_servers>
 
+    <access_control_improvements>
+        <users_without_row_policies_can_read_rows>true</users_without_row_policies_can_read_rows>
+        <on_cluster_queries_require_cluster_grant>true</on_cluster_queries_require_cluster_grant>
+        <select_from_system_db_requires_grant>true</select_from_system_db_requires_grant>
+        <select_from_information_schema_requires_grant>true</select_from_information_schema_requires_grant>
+        <settings_constraints_replace_previous>true</settings_constraints_replace_previous>
+    </access_control_improvements>
 
-    <!-- If element has 'incl' attribute, then for it's value will be used corresponding substitution from another file.
-         By default, path to file with substitutions is /etc/metrika.xml. It could be changed in config in 'include_from' element.
-         Values for substitutions are specified in /yandex/name_of_substitution elements in that file.
-    -->
-
-    <!-- ZooKeeper is used to store metadata about replicas, when using Replicated tables.
-         Optional. If you don't use replicated tables, you could omit that.
-
-See https://clickhouse.yandex/reference_en.html#Data%20replication
-    -->
-    <zookeeper>
-        <node>
-            <host>localhost</host>
-            <port>32181</port>
-        </node>
-        <implementation>testkeeper</implementation>
-    </zookeeper>
-
-    <auxiliary_zookeepers>
-        <amos>
-            <node index="1">
-                <host>bjlt-rs248.sy</host>
-                <port>2181</port>
-            </node>
-        </amos>
-    </auxiliary_zookeepers>
-
-    <!-- Substitutions for parameters of replicated tables.
-         Optional. If you don't use replicated tables, you could omit that.
-
-See https://clickhouse.yandex/reference_en.html#Creating%20replicated%20tables
-    -->
-    <macros>
-        <shard>0</shard>
-        <test>Hello, world!</test>
-    </macros>
-
-
-    <!-- Reloading interval for embedded dictionaries, in seconds. Default: 3600. -->
-    <builtin_dictionaries_reload_interval>3600</builtin_dictionaries_reload_interval>
-
-
-    <!-- Maximum session timeout, in seconds. Default: 3600. -->
-    <max_session_timeout>3600</max_session_timeout>
-
-    <!-- Default session timeout, in seconds. Default: 60. -->
-    <default_session_timeout>60</default_session_timeout>
-
-    <shutdown_wait_unfinished>0</shutdown_wait_unfinished>
-
-    <!-- Sending data to Graphite for monitoring. Several sections can be defined. -->
-    <!--
-        interval - send every X second
-        root_path - prefix for keys
-        metrics - send data from table system.metrics
-        events - send data from table system.events
-        asynchronous_metrics - send data from table system.asynchronous_metrics
-    -->
-    <!--
-        <graphite>
-        <host>localhost</host>
-        <port>42000</port>
-        <timeout>0.1</timeout>
-        <interval>60</interval>
-        <root_path>one_min</root_path>
-
-<metrics>true</metrics>
-<events>true</events>
-<asynchronous_metrics>true</asynchronous_metrics>
-</graphite>
-<graphite>
-<host>localhost</host>
-<port>42000</port>
-<timeout>0.1</timeout>
-<interval>1</interval>
-<root_path>one_sec</root_path>
-
-<metrics>true</metrics>
-<events>true</events>
-<asynchronous_metrics>false</asynchronous_metrics>
-</graphite>
-    -->
-
-
-    <!-- Query log. Used only for queries with setting log_queries = 1. -->
-    <query_log>
-        <!-- What table to insert data. If table is not exist, it will be created.
-             When query log structure is changed after system update,
-             then old table will be renamed and new table will be created automatically.
-        -->
+    <filesystem_cache_log>
         <database>system</database>
-        <table>query_log</table>
+        <table>filesystem_cache_log</table>
+    </filesystem_cache_log>
+    <allow_experimental_transactions>42</allow_experimental_transactions>
 
-        <!-- Interval of flushing data. -->
-        <flush_interval_milliseconds>60000</flush_interval_milliseconds>
-    </query_log>
-    <!-- <query_thread_log> -->
-    <!--     <database>system</database> -->
-    <!--     <table>query_thread_log</table> -->
-    <!--     <engine>ENGINE MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 6 MONTH DELETE SETTINGS min_bytes_for_wide_part = '10M'</engine> -->
-    <!--     <flush_interval_milliseconds>7500</flush_interval_milliseconds> -->
-    <!-- </query_thread_log> -->
-    <!-- <trace_log> -->
-    <!--     <database>system</database> -->
-    <!--     <table>trace_log</table> -->
-    <!--     <engine>ENGINE MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 6 MONTH DELETE SETTINGS min_bytes_for_wide_part = '10M'</engine> -->
-    <!--     <flush_interval_milliseconds>7500</flush_interval_milliseconds> -->
-    <!-- </trace_log> -->
-    <!-- <part_log> -->
-    <!--     <database>system</database> -->
-    <!--     <table>part_log</table> -->
-    <!--     <engine>ENGINE MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 6 MONTH DELETE SETTINGS min_bytes_for_wide_part = '10M'</engine> -->
-    <!--     <flush_interval_milliseconds>7500</flush_interval_milliseconds> -->
-    <!-- </part_log> -->
-    <!-- <metric_log> -->
-    <!--     <database>system</database> -->
-    <!--     <table>metric_log</table> -->
-    <!--     <engine>ENGINE MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 6 MONTH DELETE SETTINGS min_bytes_for_wide_part = '10M'</engine> -->
-    <!--     <flush_interval_milliseconds>7500</flush_interval_milliseconds> -->
-    <!--     <collect_interval_milliseconds>1000</collect_interval_milliseconds> -->
-    <!-- </metric_log> -->
-    <!-- <asynchronous_metric_log> -->
-    <!--     <database>system</database> -->
-    <!--     <table>asynchronous_metric_log</table> -->
-    <!--     <engine>ENGINE MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 6 MONTH DELETE SETTINGS min_bytes_for_wide_part = '10M'</engine> -->
-    <!--     <flush_interval_milliseconds>60000</flush_interval_milliseconds> -->
-    <!-- </asynchronous_metric_log> -->
+    <transaction_log>
+        <zookeeper_path>/test/clickhouse/txn</zookeeper_path>
 
+        <fault_probability_before_commit>0.0</fault_probability_before_commit>
 
-    <!-- Uncomment if use part_log
-         <part_log>
-         <database>system</database>
-         <table>part_log</table>
+        <!-- Fault injection after commit should not affect tests, because default waiting mode is WAIT_UNKNOWN -->
+        <fault_probability_after_commit>0.01</fault_probability_after_commit>
+    </transaction_log>
 
-<flush_interval_milliseconds>7500</flush_interval_milliseconds>
-</part_log>
-    -->
-
-
-    <!-- Parameters for embedded dictionaries, used in Yandex.Metrica.
-         See https://clickhouse.yandex/reference_en.html#Internal%20dictionaries
-    -->
-
-    <!-- Path to file with region hierarchy. -->
-    <!-- <path_to_regions_hierarchy_file>/opt/geo/regions_hierarchy.txt</path_to_regions_hierarchy_file> -->
-
-    <!-- Path to directory with files containing names of regions -->
-    <!-- <path_to_regions_names_files>/opt/geo/</path_to_regions_names_files> -->
-
-
-    <!-- Configuration of external dictionaries. See:
-         https://clickhouse.yandex/reference_en.html#External%20Dictionaries
-    -->
-
-    <!-- Uncomment if you want data to be compressed 30-100% better.
-         Don't do that if you just started using ClickHouse.
-    -->
-    <compression incl="clickhouse_compression">
-        <!--
-            <!- - Set of variants. Checked in order. Last matching case wins. If nothing matches, lz4 will be used. - ->
-            <case>
-
-<!- - Conditions. All must be satisfied. Some conditions may be omitted. - ->
-<min_part_size>10000000000</min_part_size>        <!- - Min part size in bytes. - ->
-<min_part_size_ratio>0.01</min_part_size_ratio>    <!- - Min size of part relative to whole table size. - ->
-
-<!- - What compression method to use. - ->
-<method>zstd</method>    <!- - Keep in mind that zstd compression library is highly experimental. - ->
-</case>
-        -->
-    </compression>
-
-    <resharding>
-        <task_queue_path>/clickhouse/task_queue</task_queue_path>
-    </resharding>
-
-    <!-- Allow to execute distributed DDL queries (CREATE, DROP, ALTER, RENAME) on cluster.
-         Works only if ZooKeeper is enabled. Comment it if such functionality isn't required. -->
-    <distributed_ddl>
-        <!-- Path in ZooKeeper to queue with DDL queries -->
-        <path>/clickhouse/task_queue/ddl</path>
-    </distributed_ddl>
-
-    <http_handlers>
-        <rule>
-            <url>/qp</url>
-            <methods>GET</methods>
-            <handler>
-                <type>predefined_query_handler</type>
-                <query>SELECT arrayStringConcat(arrayReverse(arrayMap(x -> demangle(addressToSymbol(x)), trace)), ';') || ' ' || toString(count()) FROM system.trace_log WHERE trace_type = 'CPU' and query_id = {id:String} and event_date != today() - 10000 GROUP BY trace format TSVRaw</query>
-            </handler>
-        </rule>
-        <defaults/>
-    </http_handlers>
-
-    <!-- wide parts enabled -->
-    <merge_tree>
-        <min_bytes_for_wide_part>0</min_bytes_for_wide_part>
-    </merge_tree>
-
-    <!-- <query_log> -->
-    <!--     <database>system</database> -->
-    <!--     <table>query_log</table> -->
-    <!--     <engine>ENGINE MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 6 MONTH DELETE SETTINGS min_bytes_for_wide_part = '10M'</engine> -->
-    <!--     <flush_interval_milliseconds>7500</flush_interval_milliseconds> -->
-    <!-- </query_log> -->
-    <!-- <query_thread_log> -->
-    <!--     <database>system</database> -->
-    <!--     <table>query_thread_log</table> -->
-    <!--     <engine>ENGINE MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 6 MONTH DELETE SETTINGS min_bytes_for_wide_part = '10M'</engine> -->
-    <!--     <flush_interval_milliseconds>7500</flush_interval_milliseconds> -->
-    <!-- </query_thread_log> -->
-    <trace_log>
-        <database>system</database>
-        <table>trace_log</table>
-        <engine>ENGINE MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 6 MONTH DELETE SETTINGS min_bytes_for_wide_part = '10M'</engine>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-    </trace_log>
-    <processors_profile_log>
-        <database>system</database>
-        <table>processors_profile_log</table>
-
-        <partition_by>toYYYYMM(event_date)</partition_by>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-    </processors_profile_log>
-    <!-- <part_log> -->
-    <!--     <database>system</database> -->
-    <!--     <table>part_log</table> -->
-    <!--     <engine>ENGINE MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 6 MONTH DELETE SETTINGS min_bytes_for_wide_part = '10M'</engine> -->
-    <!--     <flush_interval_milliseconds>7500</flush_interval_milliseconds> -->
-    <!-- </part_log> -->
-    <!-- <metric_log> -->
-    <!--     <database>system</database> -->
-    <!--     <table>metric_log</table> -->
-    <!--     <engine>ENGINE MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 6 MONTH DELETE SETTINGS min_bytes_for_wide_part = '10M'</engine> -->
-    <!--     <flush_interval_milliseconds>7500</flush_interval_milliseconds> -->
-    <!--     <collect_interval_milliseconds>1000</collect_interval_milliseconds> -->
-    <!-- </metric_log> -->
-    <!-- <asynchronous_metric_log> -->
-    <!--     <database>system</database> -->
-    <!--     <table>asynchronous_metric_log</table> -->
-    <!--     <engine>ENGINE MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 6 MONTH DELETE SETTINGS min_bytes_for_wide_part = '10M'</engine> -->
-    <!--     <flush_interval_milliseconds>60000</flush_interval_milliseconds> -->
-    <!-- </asynchronous_metric_log> -->
-
-    <local_disk_check_period_ms>1000</local_disk_check_period_ms>
-    <storage_configuration>
-        <disks>
-            <default>
-                <keep_free_space_bytes>1024</keep_free_space_bytes>
-            </default>
-            <jbod1>
-                <path>jbod1/</path>
-            </jbod1>
-            <jbod2>
-                <path>jbod2/</path>
-            </jbod2>
-            <jbod3>
-                <path>jbod3/</path>
-            </jbod3>
-        </disks>
-        <policies>
-            <jbod>
-                <volumes>
-                    <jbod_volume>
-                        <disk>jbod1</disk>
-                        <disk>jbod2</disk>
-                        <disk>jbod3</disk>
-                    </jbod_volume>
-                </volumes>
-            </jbod>
-        </policies>
-    </storage_configuration>
-
-</yandex>
+    <graphite_rollup>
+        <path_column_name>metric</path_column_name>
+        <time_column_name>timestamp</time_column_name>
+        <value_column_name>value</value_column_name>
+        <version_column_name>updated</version_column_name>
+        <pattern>
+            <regexp>\.count$</regexp>
+            <function>sum</function>
+        </pattern>
+        <pattern>
+            <regexp>\.max$</regexp>
+            <function>max</function>
+        </pattern>
+        <pattern>
+          <regexp>^five_min\.</regexp>
+          <retention>
+              <age>0</age>
+              <precision>300</precision>
+          </retention>
+          <retention>
+              <age>5184000</age>
+              <precision>3600</precision>
+          </retention>
+          <retention>
+              <age>31536000</age>
+              <precision>14400</precision>
+          </retention>
+        </pattern>
+        <pattern>
+            <regexp>^one_min</regexp>
+            <function>avg</function>
+            <retention>
+                <age>0</age>
+                <precision>60</precision>
+            </retention>
+            <retention>
+                <age>7776000</age>
+                <precision>300</precision>
+            </retention>
+            <retention>
+                <age>31536000</age>
+                <precision>600</precision>
+            </retention>
+        </pattern>
+    </graphite_rollup>
+</clickhouse>

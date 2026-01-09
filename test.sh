@@ -11,6 +11,8 @@
 
 set -e
 
+set -m   # 关键：让子进程在同一前台进程组
+
 arch=$(dpkg --print-architecture)
 
 if [ "$arch" = "amd64" ]
@@ -53,13 +55,13 @@ pf3)
     docker run --rm -t --ulimit nofile=1000000:1000000 --volume=/data/pfdebs:/package_folder --volume=/tmp/test_output3:/test_output --volume=/tmp/server_log:/var/log/clickhouse-server --volume=/data/clickhouse-testdata:/var/lib/clickhouse -e DOWNLOAD_DATASETS=0 -e TESTS_TO_RUN='--input-files /usr/share/clickhouse-test/performance/' "$docker"/clickhouse-performance-test
     ;;
 tq)
-    ( cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"/src/tests && exec ./clickhouse-test --no-random-settings --no-stateful --shard --zookeeper "$@" )
+    cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"/src/tests && ./clickhouse-test --no-random-settings --no-stateful --shard --zookeeper "$@"
     ;;
 ts)
-    ( cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"/src/tests && exec ./clickhouse-test --no-random-settings --no-stateless --shard --zookeeper "$@" )
+    cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"/src/tests && ./clickhouse-test --no-random-settings --no-stateless --shard --zookeeper "$@"
     ;;
 tp)
-    (cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"/src/tests/performance && ../../docker/test/performance-comparison/perf.py --host=localhost --port=9000 --runs=1 "$@")
+    (cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"/src/tests/performance && scripts/perf.py --host=localhost --port=9000 --runs=1 "$@")
     ;;
 tp1)
     (cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"/src/tests/performance && ../../docker/test/performance-comparison/perf.py --host=localhost --port=9001 --runs=1 "$@")

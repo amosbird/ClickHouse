@@ -4,6 +4,15 @@
     <profiles>
         <!-- Default settings. -->
         <default>
+            <!-- <enable_parallel_replicas>1</enable_parallel_replicas> -->
+            <!-- <max_parallel_replicas>10</max_parallel_replicas> -->
+            <!-- <cluster_for_parallel_replicas>default_parallel_replicas</cluster_for_parallel_replicas> -->
+            <!-- <parallel_replicas_for_non_replicated_merge_tree>1</parallel_replicas_for_non_replicated_merge_tree> -->
+
+            <!-- <merge_tree_min_read_task_size>1</merge_tree_min_read_task_size> -->
+            <!-- <merge_tree_min_rows_for_concurrent_read>8192</merge_tree_min_rows_for_concurrent_read> -->
+            <!-- <merge_tree_min_bytes_for_concurrent_read>81920</merge_tree_min_bytes_for_concurrent_read> -->
+            <!-- <max_block_size>8192</max_block_size> -->
             <allow_introspection_functions>1</allow_introspection_functions>
             <!-- <query_profiler_cpu_time_period_ns>0</query_profiler_cpu_time_period_ns> -->
             <!-- <query_profiler_real_time_period_ns>0</query_profiler_real_time_period_ns> -->
@@ -12,6 +21,8 @@
 
             <!-- Use cache of uncompressed blocks of data. Meaningful only for processing many of very short queries. -->
             <use_uncompressed_cache>0</use_uncompressed_cache>
+            <merge_tree_max_rows_to_use_cache>1000000000000000000000</merge_tree_max_rows_to_use_cache>
+            <merge_tree_max_bytes_to_use_cache>0</merge_tree_max_bytes_to_use_cache>
             <!-- How to choose between replicas during distributed query processing.
                  random - choose random replica from set of replicas with minimum number of errors
                  nearest_hostname - from set of replicas with minimum number of errors, choose replica
@@ -33,6 +44,7 @@
         <!-- If user name was not specified, 'default' user is used. -->
         <default>
             <access_management>1</access_management>
+            <named_collection_control>1</named_collection_control>
 
             <!-- Password could be specified in plaintext or in SHA256 (in hex format).
 

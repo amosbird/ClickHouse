@@ -3,7 +3,11 @@
 set -e
 export LD_BIND_NOW=1
 
-export ASAN_OPTIONS=detect_odr_violation=0
+ulimit -c 0
+
+export ASAN_SYMBOLIZER_PATH=/tmp/gentoo/home/amos/toolchain-sysroot/bin/llvm-symbolizer
+export ASAN_OPTIONS=${ASAN_OPTIONS}:detect_odr_violation=1:symbolize=1:verbosity=0
+export LSAN_OPTIONS=${LSAN_OPTIONS}:suppressions=script/lsan_suppressions.txt
 
 # export LIBUNWIND_PRINT_DWARF=1
 # export LIBUNWIND_PRINT_UNWINDING=1
@@ -12,7 +16,11 @@ cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 
 export LIBHDFS3_CONF=etc/hdfs-client.xml
 
-clickhouse_server=build/programs/clickhouse-server
+clickhouse_server="build/programs/clickhouse server"
+# clickhouse_server="./clickhouse-base server"
+# clickhouse_server="./clickhouse-opt server"
+# clickhouse_server="./clickhouse-opt-query-cache server"
+# clickhouse_server="./clickhouse-opt-order-by-limit server"
 config_path=etc
 
 # export THREAD_FUZZER_CPU_TIME_PERIOD_US=1000
@@ -40,7 +48,7 @@ s)
     ;;
 sd)
     # numactl --membind=0 taskset -c 10 $clickhouse_server --config "$config_path"/config-dev.xml "$@"
-    tmuxgdb $clickhouse_server --config "$config_path"/config-dev.xml "$@"
+    lldb $clickhouse_server -- --config "$config_path"/config-dev.xml "$@"
     ;;
 s2)
     $clickhouse_server --config "$config_path"/config-dev2.xml "$@"

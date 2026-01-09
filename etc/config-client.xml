@@ -1,7 +1,8 @@
 <config>
   <query_id_formats>
     <speedscope>
-http://clickhouse:18123/#profileURL=qp%3Fid%3D{query_id}
+http://127.0.0.1:8123/speedscope#profileURL=qp%3Fid%3D{query_id}
+{query_id}
     </speedscope>
   </query_id_formats>
 </config>

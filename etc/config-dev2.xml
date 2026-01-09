@@ -263,21 +263,21 @@ Example: W-SU is an alias for Europe/Moscow and Zulu is an alias for UTC.
 
 See https://clickhouse.yandex/reference_en.html#Data%20replication
     -->
-    <zookeeper>
-        <node>
-            <host>localhost</host>
-            <port>32181</port>
-        </node>
-    </zookeeper>
+    <!-- <zookeeper> -->
+    <!--     <node> -->
+    <!--         <host>localhost</host> -->
+    <!--         <port>32181</port> -->
+    <!--     </node> -->
+    <!-- </zookeeper> -->
 
-    <auxiliary_zookeepers>
-        <amos>
-            <node index="1">
-                <host>bjlt-rs248.sy</host>
-                <port>2181</port>
-            </node>
-        </amos>
-    </auxiliary_zookeepers>
+    <!-- <auxiliary_zookeepers> -->
+    <!--     <amos> -->
+    <!--         <node index="1"> -->
+    <!--             <host>bjlt-rs248.sy</host> -->
+    <!--             <port>2181</port> -->
+    <!--         </node> -->
+    <!--     </amos> -->
+    <!-- </auxiliary_zookeepers> -->
 
     <!-- Substitutions for parameters of replicated tables.
          Optional. If you don't use replicated tables, you could omit that.
