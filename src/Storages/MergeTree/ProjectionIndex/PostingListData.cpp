@@ -349,9 +349,15 @@ public:
 private:
     void flushLargeBlock()
     {
+        UInt64 offset_for_dictionary = large_block_start_offset;
+
         if (write_block_index)
         {
             /// Data Section is already written to data_out. Now append the Index Section.
+            /// Record the Index Section start offset — this is what goes into the dictionary stream
+            /// so that the V2 reader can seek directly to the Index Section.
+            offset_for_dictionary = data_out.count();
+
             UInt32 num_packed_blocks = static_cast<UInt32>(packed_block_last_doc_ids.size());
 
             /// Write Index Section:
@@ -369,11 +375,10 @@ private:
         }
 
         /// Write `(last_doc_id, offset)` to dictionary stream.
-        /// The offset always points to the Data Section start (= first sub-block).
-        /// v1 reader seeks here directly; v2 reader can locate the trailing
-        /// Index Section for sub-block random access.
+        /// V1 (write_block_index=false): offset points to Data Section start.
+        /// V2 (write_block_index=true): offset points to Index Section start.
         VarInt::writeVarUInt32(current_block_last_doc_id, meta_out);
-        writeVarUInt(large_block_start_offset, meta_out);
+        writeVarUInt(offset_for_dictionary, meta_out);
 
         /// Reset for next large block.
         docs_in_current_block = 0;

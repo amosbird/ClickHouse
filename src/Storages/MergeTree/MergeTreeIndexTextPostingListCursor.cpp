@@ -2,6 +2,7 @@
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeReaderStream.h>
 #include <Common/ElapsedTimeProfileEventIncrement.h>
+#include <IO/ReadHelpers.h>
 
 #include <turbopfor.h>
 
@@ -18,7 +19,7 @@ namespace
 
 /// Prefix-Based Variable-Length Integer Decoding.
 /// This mirrors the encoding used in PostingListData.cpp (VarInt namespace).
-/// Used for reading compressed block sizes in .lpst files.
+/// Used for reading compressed block sizes and Index Section fields in .lpst files.
 ///
 /// Encoding thresholds:
 /// - [0 - 176]        : 1 byte
@@ -85,33 +86,33 @@ inline void readPrefixVarUInt32(UInt32 & x, ReadBuffer & istr)
 
 } // anonymous namespace
 
-PostingListCursor::PostingListCursor(LargePostingListReaderStream * stream_, const TokenPostingsInfo & info_, size_t segment)
+PostingListCursor::PostingListCursor(LargePostingListReaderStream * stream_, const TokenPostingsInfo & info_, size_t large_block)
     : stream(stream_)
     , info(info_)
 {
     current_values.reserve(TURBOPFOR_BLOCK_SIZE);
-    segments.push_back(segment);
-    prepare(segment);
+    large_blocks.push_back(large_block);
+    prepare(large_block);
 }
 
-PostingListCursor::PostingListCursor(const TokenPostingsInfo & info_, size_t segment)
-    : PostingListCursor(nullptr, info_, segment)
+PostingListCursor::PostingListCursor(const TokenPostingsInfo & info_, size_t large_block)
+    : PostingListCursor(nullptr, info_, large_block)
 {
 }
 
-void PostingListCursor::addSegment(size_t s)
+void PostingListCursor::addLargeBlock(size_t s)
 {
-    auto it = std::find(segments.begin(), segments.end(), s);
-    if (it == segments.end())
+    auto it = std::find(large_blocks.begin(), large_blocks.end(), s);
+    if (it == large_blocks.end())
     {
-        segments.push_back(s);
+        large_blocks.push_back(s);
         is_valid = true;
     }
 }
 
-void PostingListCursor::prepare(size_t segment)
+void PostingListCursor::prepare(size_t large_block_idx)
 {
-    if (current_segment == segment && current_segment != std::numeric_limits<size_t>::max())
+    if (current_large_block_idx == large_block_idx && current_large_block_idx != std::numeric_limits<size_t>::max())
         return;
 
     current_values.reserve(TURBOPFOR_BLOCK_SIZE);
@@ -125,7 +126,7 @@ void PostingListCursor::prepare(size_t segment)
         info.embedded_postings->toUint32Array(current_values.data());
         current_block = 0;
         block_count = 1;
-        current_segment = segment;
+        current_large_block_idx = large_block_idx;
         is_valid = true;
         is_embedded = true;
 
@@ -137,72 +138,51 @@ void PostingListCursor::prepare(size_t segment)
     }
 
     /// Large posting list: read from LargePostingListReaderStream using TurboPFor encoding.
-    /// Each segment corresponds to one LargePostingBlockMeta.
+    /// Each large block corresponds to one LargePostingBlockMeta.
     chassert(stream);
-    chassert(segment < info.offsets.size());
+    chassert(large_block_idx < info.offsets.size());
+    chassert(large_block_idx < info.ranges.size());
 
-    const auto & block_meta = info.offsets[segment];
-    segment_doc_count = block_meta.block_doc_count;
-    segment_first_doc_id = static_cast<UInt32>(info.ranges[segment].begin);
+    const auto & block_meta = info.offsets[large_block_idx];
+    large_block_doc_count = block_meta.block_doc_count;
+    last_decoded_doc_id = static_cast<UInt32>(info.ranges[large_block_idx].begin);
 
-    /// The .lpst file stores `segment_doc_count` delta-encoded doc IDs.
-    /// For segment 0: the delta base is `first_doc_id` (= range.begin), and `first_doc_id`
-    ///                itself is NOT in the .lpst stream (it's stored in metadata).
-    /// For segment N>0: the delta base is `range.begin - 1`, and the docs in .lpst start
-    ///                  from `range.begin` (the base itself is NOT a real doc).
-
-    /// Compute block structure for the delta-encoded portion
-    size_t full_blocks = segment_doc_count / TURBOPFOR_BLOCK_SIZE;
-    tail_size = segment_doc_count % TURBOPFOR_BLOCK_SIZE;
+    /// Compute packed block structure for the delta-encoded portion
+    size_t full_blocks = large_block_doc_count / TURBOPFOR_BLOCK_SIZE;
+    tail_size = large_block_doc_count % TURBOPFOR_BLOCK_SIZE;
     block_count = full_blocks + (tail_size > 0 ? 1 : 0);
 
-    /// For segment 0, we have one extra doc (first_doc_id) that is not in any block.
-    /// We treat it as: first_doc_id gets prepended to the first decoded block.
-    /// For other segments, all docs come from the .lpst blocks.
-
     current_block = 0;
-    current_segment = segment;
-
-    /// Set delta base for p4D1Dec
-    if (segment == 0)
-        last_decoded_doc_id = segment_first_doc_id;
-    else
-        last_decoded_doc_id = segment_first_doc_id - 1;
-
-    /// Seek to the data offset in the .lpst file
-    stream->seek(block_meta.offset);
+    current_large_block_idx = large_block_idx;
 
     /// Compute density
-    const auto & range = info.ranges[segment];
+    const auto & range = info.ranges[large_block_idx];
     UInt32 range_span = static_cast<UInt32>(range.end) - static_cast<UInt32>(range.begin) + 1;
-    density_val = (range_span > 0) ? static_cast<double>(segment_doc_count + (segment == 0 ? 1 : 0)) / static_cast<double>(range_span) : 1.0;
+    density_val = (range_span > 0) ? static_cast<double>(large_block_doc_count + (large_block_idx == 0 ? 1 : 0)) / static_cast<double>(range_span) : 1.0;
 
-    if (block_count > 0)
-    {
-        decodeNextBlock();
+    /// --- V2: Load Index Session ---
+    /// In V2 format, block_meta.offset points directly to the Index Section
+    /// (not the Data Section). Seek there and read the packed block index.
+    stream->seek(block_meta.offset);
+    auto & data_buf = *stream->getDataBuffer();
 
-        /// For segment 0, insert first_doc_id at the beginning of the decoded block.
-        /// p4D1Dec uses `last_decoded_doc_id` (= first_doc_id) as delta base, so the
-        /// decoded values start AFTER first_doc_id. We need to prepend it.
-        if (segment == 0)
-        {
-            current_values.insert(current_values.begin(), segment_first_doc_id);
-        }
+    /// Read Index Section: [num_packed_blocks] [last_doc_ids...] [offsets...]
+    UInt32 num_packed_blocks;
+    readPrefixVarUInt32(num_packed_blocks, data_buf);
+    chassert(num_packed_blocks == block_count);
+
+    packed_block_last_doc_ids.resize(num_packed_blocks);
+    packed_block_offsets.resize(num_packed_blocks);
+
+    for (UInt32 j = 0; j < num_packed_blocks; ++j)
+        readPrefixVarUInt32(packed_block_last_doc_ids[j], data_buf);
+    for (UInt32 j = 0; j < num_packed_blocks; ++j)
+        readVarUInt(packed_block_offsets[j], data_buf);
+
+    if (block_count > 0 || large_block_idx == 0)
         is_valid = true;
-    }
-    else if (segment == 0)
-    {
-        /// Only first_doc_id, no delta-encoded docs
-        current_values.resize(1);
-        current_values[0] = segment_first_doc_id;
-        block_count = 1;
-        index = 0;
-        is_valid = true;
-    }
     else
-    {
         is_valid = false;
-    }
 }
 
 bool PostingListCursor::decodeNextBlock()
@@ -212,7 +192,16 @@ bool PostingListCursor::decodeNextBlock()
 
     chassert(stream);
 
-    auto & data_buf = *stream->getDataBuffer();
+    chassert(current_block < packed_block_offsets.size());
+    stream->seek(packed_block_offsets[current_block]);
+
+    /// Compute delta base for the target packed block.
+    if (current_block == 0)
+        last_decoded_doc_id = static_cast<UInt32>(info.ranges[current_large_block_idx].begin);
+    else
+        last_decoded_doc_id = packed_block_last_doc_ids[current_block - 1];
+
+    auto &data_buf = *stream->getDataBuffer();
 
     /// Read compressed bytes length (Prefix VarInt encoded in .lpst)
     UInt32 bytes;
@@ -245,90 +234,86 @@ bool PostingListCursor::decodeNextBlock()
     return true;
 }
 
-bool PostingListCursor::decodeBlock(size_t block_index)
-{
-    /// To decode a specific block, we need to decode sequentially from the current position.
-    /// Since TurboPFor is delta-encoded, we can't random-access individual blocks without
-    /// decoding from the beginning of the segment.
-    ///
-    /// However, for seek operations, we re-prepare the segment and decode blocks sequentially.
-    /// This is acceptable because:
-    /// 1. Seek typically moves forward within a segment
-    /// 2. Large posting blocks are already 1MB chunks, so sequential decode is fast
-
-    while (current_block < block_index)
-    {
-        ++current_block;
-        if (!decodeNextBlock())
-            return false;
-    }
-    return true;
-}
-
 void PostingListCursor::seek(uint32_t target)
 {
-    if (!seekImpl(target))
+    if (!is_embedded && seekImpl(target))
+        return;
+
+    int unused_large_block_index = -1;
+    bool found = false;
+    for (size_t i = 0; i < large_blocks.size(); ++i)
     {
-        int unused_segment_index = -1;
-        bool found = false;
-        for (size_t i = 0; i < segments.size(); ++i)
+        auto large_block = large_blocks[i];
+        if (large_block < current_large_block_idx)
         {
-            auto segment = segments[i];
-            if (segment < current_segment)
+            unused_large_block_index = static_cast<int>(i);
+            continue;
+        }
+        const auto & range = info.ranges[large_block];
+        if (range.end >= target)
+        {
+            prepare(large_block);
+            if (seekImpl(target))
             {
-                unused_segment_index = static_cast<int>(i);
-                continue;
-            }
-            const auto & range = info.ranges[segment];
-            if (range.end >= target)
-            {
-                prepare(segment);
-                if (seekImpl(target))
-                {
-                    found = true;
-                    break;
-                }
+                found = true;
+                break;
             }
         }
-
-        if (unused_segment_index > 0)
-            maybeEraseUnusedSegments(unused_segment_index);
-        is_valid = found;
     }
+
+    if (unused_large_block_index > 0)
+        maybeEraseUnusedLargeBlocks(unused_large_block_index);
+    is_valid = found;
 }
 
 bool PostingListCursor::seekImpl(uint32_t target)
 {
-    /// First check current decoded block
+    if (is_embedded)
+    {
+        /// Embedded: all values in current_values, simple binary search
+        auto it = std::lower_bound(current_values.begin(), current_values.end(), target);
+        if (it != current_values.end())
+        {
+            index = static_cast<size_t>(it - current_values.begin());
+            return true;
+        }
+        return false;
+    }
+
+    /// V2: use packed block index for O(log N) random access within the large block.
+
+    /// First check if target is in the current decoded block
     if (index < current_values.size())
     {
-        auto it = std::lower_bound(current_values.begin(), current_values.end(), target);
-        if (it != current_values.end() && *it >= target)
+        auto it = std::lower_bound(current_values.begin() + index, current_values.end(), target);
+        if (it != current_values.end())
         {
             index = static_cast<size_t>(it - current_values.begin());
             return true;
         }
-        if (is_embedded)
-            return false;
     }
 
-    /// For TurboPFor encoded data, we need to decode blocks sequentially
-    /// because delta encoding prevents random block access.
-    /// Advance to the next block and keep looking.
-    ++current_block;
-    while (current_block < block_count)
+    /// Binary search on packed_block_last_doc_ids to find the target packed block.
+    /// Find the first j where last_doc_ids[j] >= target.
+    auto it = std::lower_bound(packed_block_last_doc_ids.begin(), packed_block_last_doc_ids.end(), target);
+    if (it == packed_block_last_doc_ids.end())
+        return false;
+
+    size_t j = static_cast<size_t>(it - packed_block_last_doc_ids.begin());
+
+    /// Random seek to the target packed block via `need_seek_before_decode`.
+    /// Delta base and first_doc_id prepend are handled inside `decodeNextBlock`.
+    current_block = j;
+    decodeNextBlock();
+
+    /// Search within the decoded block
+    auto found_it = std::lower_bound(current_values.begin(), current_values.end(), target);
+    if (found_it != current_values.end())
     {
-        if (!decodeNextBlock())
-            return false;
-
-        auto it = std::lower_bound(current_values.begin(), current_values.end(), target);
-        if (it != current_values.end() && *it >= target)
-        {
-            index = static_cast<size_t>(it - current_values.begin());
-            return true;
-        }
-        ++current_block;
+        index = static_cast<size_t>(found_it - current_values.begin());
+        return true;
     }
+
     return false;
 }
 
@@ -386,9 +371,9 @@ inline void padColumnForOr(UInt8 * __restrict out, const std::vector<uint32_t> &
     }
 }
 
-void PostingListCursor::linearOrImpl(size_t segment, UInt8 * __restrict out, size_t row_begin, size_t row_end)
+void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out, size_t row_begin, size_t row_end)
 {
-    chassert(segment < info.ranges.size());
+    chassert(large_block < info.ranges.size());
 
     if (unlikely(is_embedded))
     {
@@ -402,11 +387,10 @@ void PostingListCursor::linearOrImpl(size_t segment, UInt8 * __restrict out, siz
         return;
     }
 
-    /// Process the current already-decoded block (block 0 decoded in prepare()),
-    /// then decode subsequent blocks sequentially.
+    /// Process the current already-decoded block, then decode subsequent blocks sequentially.
     for (size_t blk = current_block; blk < block_count; ++blk)
     {
-        /// For the first iteration, current_values already has the decoded block from prepare().
+        /// For the first iteration, current_values already has the decoded block.
         /// For subsequent iterations, decode the next block from the stream.
         if (blk > current_block)
         {
@@ -442,24 +426,24 @@ void PostingListCursor::linearOrImpl(size_t segment, UInt8 * __restrict out, siz
 
 void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_rows)
 {
-    int unused_segment_index = -1;
-    for (size_t i = 0; i < segments.size(); ++i)
+    int unused_large_block_index = -1;
+    for (size_t i = 0; i < large_blocks.size(); ++i)
     {
-        auto segment = segments[i];
-        size_t begin = info.ranges[segment].begin;
-        size_t end = info.ranges[segment].end;
+        auto large_block = large_blocks[i];
+        size_t begin = info.ranges[large_block].begin;
+        size_t end = info.ranges[large_block].end;
 
         if (row_offset > end || (row_offset + num_rows) < begin)
         {
-            unused_segment_index = static_cast<int>(i);
+            unused_large_block_index = static_cast<int>(i);
             continue;
         }
         end = std::min(end, row_offset + num_rows - 1);
-        prepare(segment);
-        linearOrImpl(segment, data, row_offset, end);
+        prepare(large_block);
+        linearOrImpl(large_block, data, row_offset, end);
     }
-    if (unused_segment_index > 0)
-        maybeEraseUnusedSegments(unused_segment_index);
+    if (unused_large_block_index > 0)
+        maybeEraseUnusedLargeBlocks(unused_large_block_index);
 }
 
 inline void padColumnForAnd(UInt8 * __restrict out, const std::vector<uint32_t> & current_values, size_t row_begin, size_t begin, size_t length)
@@ -491,9 +475,9 @@ inline void padColumnForAnd(UInt8 * __restrict out, const std::vector<uint32_t> 
     }
 }
 
-void PostingListCursor::linearAndImpl(size_t segment, UInt8 * __restrict out, size_t row_begin, size_t row_end)
+void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out, size_t row_begin, size_t row_end)
 {
-    chassert(segment < info.ranges.size());
+    chassert(large_block < info.ranges.size());
 
     if (unlikely(is_embedded))
     {
@@ -542,25 +526,25 @@ void PostingListCursor::linearAndImpl(size_t segment, UInt8 * __restrict out, si
 
 void PostingListCursor::linearAnd(UInt8 * data, size_t row_offset, size_t num_rows)
 {
-    int unused_segment_index = -1;
-    for (size_t i = 0; i < segments.size(); ++i)
+    int unused_large_block_index = -1;
+    for (size_t i = 0; i < large_blocks.size(); ++i)
     {
-        auto segment = segments[i];
-        size_t begin = info.ranges[segment].begin;
-        size_t end = info.ranges[segment].end;
+        auto large_block = large_blocks[i];
+        size_t begin = info.ranges[large_block].begin;
+        size_t end = info.ranges[large_block].end;
 
         if (row_offset > end || (row_offset + num_rows) < begin)
         {
-            unused_segment_index = static_cast<int>(i);
+            unused_large_block_index = static_cast<int>(i);
             continue;
         }
         end = std::min(end, row_offset + num_rows - 1);
-        prepare(segments[i]);
-        linearAndImpl(segment, data, row_offset, end);
+        prepare(large_blocks[i]);
+        linearAndImpl(large_block, data, row_offset, end);
     }
 
-    if (unused_segment_index > 0)
-        maybeEraseUnusedSegments(unused_segment_index);
+    if (unused_large_block_index > 0)
+        maybeEraseUnusedLargeBlocks(unused_large_block_index);
 }
 
 namespace
@@ -806,18 +790,30 @@ void intersectLeapfrogHeap(UInt8 * out, const std::vector<PostingListCursorPtr> 
 void intersectLeapfrog(UInt8 * out, const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t effective_end)
 {
     if (cursors.size() == 2)
-        return intersectTwo(out, cursors[0], cursors[1], row_offset, effective_end);
+    {
+        intersectTwo(out, cursors[0], cursors[1], row_offset, effective_end);
+        return;
+    }
 
     if (cursors.size() == 3)
-        return intersectThree(out, cursors[0], cursors[1], cursors[2], row_offset, effective_end);
+    {
+        intersectThree(out, cursors[0], cursors[1], cursors[2], row_offset, effective_end);
+        return;
+    }
 
     if (cursors.size() == 4)
-        return intersectFour(out, cursors[0], cursors[1], cursors[2], cursors[3], row_offset, effective_end);
+    {
+        intersectFour(out, cursors[0], cursors[1], cursors[2], cursors[3], row_offset, effective_end);
+        return;
+    }
 
     if (cursors.size() <= 8)
-        return intersectLeapfrogLinear(out, cursors, row_offset, effective_end);
+    {
+        intersectLeapfrogLinear(out, cursors, row_offset, effective_end);
+        return;
+    }
 
-    return intersectLeapfrogHeap(out, cursors, row_offset, effective_end);
+    intersectLeapfrogHeap(out, cursors, row_offset, effective_end);
 }
 
 /// Brute-force intersection using bitmap counting.
@@ -905,7 +901,10 @@ void lazyIntersectPostingLists(IColumn & column, const PostingListCursorMap & po
     density = density / static_cast<double>(n);
 
     if (n < 256 && (density >= density_threshold || brute_force_apply))
-        return intersectBruteForce(out, cursors, row_offset, num_rows);
+    {
+        intersectBruteForce(out, cursors, row_offset, num_rows);
+        return;
+    }
 
     for (size_t i = 0; i < n; ++i)
     {
@@ -914,7 +913,7 @@ void lazyIntersectPostingLists(IColumn & column, const PostingListCursorMap & po
             return;
     }
 
-    return intersectLeapfrog(out, cursors, row_offset, end);
+    intersectLeapfrog(out, cursors, row_offset, end);
 }
 
 }

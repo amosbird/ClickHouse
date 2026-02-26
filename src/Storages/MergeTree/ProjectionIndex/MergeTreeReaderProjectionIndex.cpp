@@ -76,12 +76,12 @@ PostingListCursorMap MergeTreeReaderProjectionIndex::buildCursorMap()
         else if (!token_info.offsets.empty())
         {
             /// For large postings, create cursor with the large posting stream.
-            /// Each LargePostingBlockMeta in offsets is treated as a segment.
+            /// Each LargePostingBlockMeta in offsets corresponds to one large block.
             chassert(granule_projection.large_posting_stream);
             auto cursor = std::make_shared<PostingListCursor>(
                 granule_projection.large_posting_stream.get(), token_info, 0);
             for (size_t s = 1; s < token_info.offsets.size(); ++s)
-                cursor->addSegment(s);
+                cursor->addLargeBlock(s);
             result.emplace(token, std::move(cursor));
         }
     }
