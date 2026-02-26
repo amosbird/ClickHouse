@@ -1,7 +1,6 @@
 #include <Storages/MergeTree/ProjectionIndex/PostingListData.h>
 
 #include <IO/WriteBuffer.h>
-#include <IO/WriteBufferFromString.h>
 #include <IO/WriteHelpers.h>
 #include <Storages/MergeTree/MergeTreeDataPartWriterOnDisk.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
@@ -300,21 +299,34 @@ void PostingListWriter::add(UInt32 doc_id, Arena * arena, uint8_t * packed_buffe
 class LargePostingBlockWriter
 {
 public:
-    LargePostingBlockWriter(WriteBuffer & meta_out_, WriteBuffer & data_out_, UInt32 docs_per_large_block_)
+    LargePostingBlockWriter(WriteBuffer & meta_out_, WriteBuffer & data_out_, UInt32 docs_per_large_block_, bool write_block_index_)
         : meta_out(meta_out_)
         , data_out(data_out_)
         , docs_per_large_block(docs_per_large_block_)
+        , write_block_index(write_block_index_)
     {
+        if (write_block_index)
+        {
+            UInt32 packed_blocks_per_large_block = docs_per_large_block / 128;
+            packed_block_last_doc_ids.reserve(packed_blocks_per_large_block);
+            packed_block_offsets.reserve(packed_blocks_per_large_block);
+        }
     }
 
     void addBlock(UInt32 last_doc_id, const char * data, UInt32 bytes)
     {
-        /// Phase 1: buffer sub-block data and record metadata.
-        UInt32 varint_len = static_cast<UInt32>(VarInt::getLengthOfVarUInt32(bytes));
-        VarInt::writeVarUInt32(bytes, temp_data_buf);
-        temp_data_buf.write(data, bytes);
+        if (docs_in_current_block == 0)
+            large_block_start_offset = data_out.count();
 
-        sub_block_metas.push_back({last_doc_id, varint_len + bytes});
+        if (write_block_index)
+        {
+            /// Record the absolute offset of this sub-block before writing.
+            packed_block_last_doc_ids.push_back(last_doc_id);
+            packed_block_offsets.push_back(data_out.count());
+        }
+
+        VarInt::writeVarUInt32(bytes, data_out);
+        data_out.write(data, bytes);
 
         /// Always count a packed block as 128 docs.
         /// The tail block is the final one and will be flushed immediately,
@@ -337,91 +349,49 @@ public:
 private:
     void flushLargeBlock()
     {
-        /// Phase 2: write Index Section then Data Section.
-        UInt64 index_section_offset = data_out.count();
-        UInt32 num_sub_blocks = static_cast<UInt32>(sub_block_metas.size());
-
-        /// Compute the fixed part of the Index Section size:
-        /// `[PrefixVarInt: num_sub_blocks]` + N × `[PrefixVarInt: last_doc_id]`
-        size_t fixed_index_size = VarInt::getLengthOfVarUInt32(num_sub_blocks);
-        for (const auto & meta : sub_block_metas)
-            fixed_index_size += VarInt::getLengthOfVarUInt32(meta.last_doc_id);
-
-        /// Compute absolute offsets. Since `absolute_offset[j]` depends on `index_section_size`
-        /// which depends on encoding size of `absolute_offset[j]`, iterate until stable.
-        /// Converges in at most 2 passes because sizes only grow.
-        std::vector<UInt64> abs_offsets(num_sub_blocks);
-        size_t offsets_encoding_size = 0;
-
-        /// Pass 1: estimate with zero-valued offsets (minimum VarUInt64 encoding = 1 byte each)
-        offsets_encoding_size = num_sub_blocks; /// 1 byte per offset minimum
-        UInt64 data_section_start = index_section_offset + fixed_index_size + offsets_encoding_size;
-        UInt64 running = 0;
-        for (UInt32 j = 0; j < num_sub_blocks; ++j)
+        if (write_block_index)
         {
-            abs_offsets[j] = data_section_start + running;
-            running += sub_block_metas[j].data_bytes;
+            /// Data Section is already written to data_out. Now append the Index Section.
+            UInt32 num_packed_blocks = static_cast<UInt32>(packed_block_last_doc_ids.size());
+
+            /// Write Index Section:
+            /// [PrefixVarInt: num_packed_blocks]
+            VarInt::writeVarUInt32(num_packed_blocks, data_out);
+            /// N × [PrefixVarInt: last_doc_id]
+            for (const auto & id : packed_block_last_doc_ids)
+                VarInt::writeVarUInt32(id, data_out);
+            /// N × [VarUInt64: absolute_offset]
+            for (const auto & off : packed_block_offsets)
+                writeVarUInt(off, data_out);
+
+            packed_block_last_doc_ids.clear();
+            packed_block_offsets.clear();
         }
 
-        /// Recompute actual encoding size of offsets
-        size_t new_offsets_encoding_size = 0;
-        for (UInt32 j = 0; j < num_sub_blocks; ++j)
-            new_offsets_encoding_size += getLengthOfVarUInt(abs_offsets[j]);
-
-        /// Pass 2: if encoding size changed, recompute with correct size
-        if (new_offsets_encoding_size != offsets_encoding_size)
-        {
-            offsets_encoding_size = new_offsets_encoding_size;
-            data_section_start = index_section_offset + fixed_index_size + offsets_encoding_size;
-            running = 0;
-            for (UInt32 j = 0; j < num_sub_blocks; ++j)
-            {
-                abs_offsets[j] = data_section_start + running;
-                running += sub_block_metas[j].data_bytes;
-            }
-        }
-
-        /// Write Index Section to `data_out`:
-        /// [PrefixVarInt: num_sub_blocks]
-        VarInt::writeVarUInt32(num_sub_blocks, data_out);
-        /// N × [PrefixVarInt: last_doc_id]
-        for (const auto & meta : sub_block_metas)
-            VarInt::writeVarUInt32(meta.last_doc_id, data_out);
-        /// N × [VarUInt64: absolute_offset]
-        for (UInt32 j = 0; j < num_sub_blocks; ++j)
-            writeVarUInt(abs_offsets[j], data_out);
-
-        /// Write Data Section from temp buffer to `data_out`.
-        auto data_view = temp_data_buf.stringView();
-        data_out.write(data_view.data(), data_view.size());
-
-        /// Write `(last_doc_id, index_section_offset)` to dictionary stream.
+        /// Write `(last_doc_id, offset)` to dictionary stream.
+        /// The offset always points to the Data Section start (= first sub-block).
+        /// v1 reader seeks here directly; v2 reader can locate the trailing
+        /// Index Section for sub-block random access.
         VarInt::writeVarUInt32(current_block_last_doc_id, meta_out);
-        writeVarUInt(index_section_offset, meta_out);
+        writeVarUInt(large_block_start_offset, meta_out);
 
         /// Reset for next large block.
-        sub_block_metas.clear();
-        temp_data_buf.restart();
         docs_in_current_block = 0;
         ++num_large_blocks_written;
     }
-
-    struct SubBlockMeta
-    {
-        UInt32 last_doc_id;
-        UInt32 data_bytes; /// varint_size(packed_bytes_len) + packed_bytes_len
-    };
 
     WriteBuffer & meta_out;
     WriteBuffer & data_out;
 
     UInt32 docs_per_large_block;
+    bool write_block_index;
     UInt32 docs_in_current_block = 0;
     UInt32 current_block_last_doc_id = 0;
     UInt32 num_large_blocks_written = 0;
+    UInt64 large_block_start_offset = 0;
 
-    std::vector<SubBlockMeta> sub_block_metas;
-    WriteBufferFromOwnString temp_data_buf;
+    std::vector<UInt32> packed_block_last_doc_ids;
+    std::vector<UInt64> packed_block_offsets;
 };
 
 void PostingListWriter::finish(
@@ -478,7 +448,7 @@ void PostingListWriter::finish(
     chassert(num_large_blocks >= 1);
     VarInt::writeVarUInt32(num_large_blocks, wb);
 
-    LargePostingBlockWriter block_writer(wb, large_posting, docs_per_large_block);
+    LargePostingBlockWriter block_writer(wb, large_posting, docs_per_large_block, true /* write_block_index */);
 
     /// Iterate packed 128-doc chunks
     PostingListChunk * it = blocks_head;
@@ -760,24 +730,6 @@ void mergePostingCursors(std::vector<ReaderStreamCursor> & cursors, EmitFirst &&
     }
 }
 
-/// Reads and discards the Index Section from a data buffer.
-/// After this call, the buffer is positioned at the start of the Data Section.
-static void skipIndexSection(ReadBuffer & buf)
-{
-    UInt32 num_sub_blocks;
-    VarInt::readVarUInt32(num_sub_blocks, buf);
-    for (UInt32 j = 0; j < num_sub_blocks; ++j)
-    {
-        UInt32 dummy;
-        VarInt::readVarUInt32(dummy, buf);
-    }
-    for (UInt32 j = 0; j < num_sub_blocks; ++j)
-    {
-        UInt64 dummy;
-        readVarUInt(dummy, buf);
-    }
-}
-
 PostingListPtr ReaderStreamEntry::materializeLargeBlockIntoBitmap(
     LargePostingListReaderStream & stream, UInt32 last_doc_id, UInt32 block_doc_count, UInt64 offset, bool include_first_doc)
 {
@@ -789,16 +741,13 @@ PostingListPtr ReaderStreamEntry::materializeLargeBlockIntoBitmap(
         offset,
         include_first_doc);
 
-    /// Seek to the Index Section start, then skip past it to reach the Data Section.
     stream.seek(offset);
-    auto & data_buf = *stream.getDataBuffer();
-    skipIndexSection(data_buf);
 
     ReaderStreamCursor cursor(
         &stream,
         last_doc_id,
         block_doc_count,
-        static_cast<UInt64>(stream.getPosition()),
+        offset,
         false /* do_seek: already positioned at Data Section */,
         include_first_doc);
     return cursor.materializeIntoBitmap();
@@ -955,11 +904,7 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     for (const auto & lazy_stream : lazy_posting_stream->streams)
     {
         chassert(!lazy_stream.large_posting_blocks.empty());
-        /// Seek to the first large block and skip its Index Section to position
-        /// at the Data Section start.
         lazy_stream.stream->seek(lazy_stream.large_posting_blocks.front().offset);
-        auto & data_buf = *lazy_stream.stream->getDataBuffer();
-        skipIndexSection(data_buf);
 
         cursors.emplace_back(
             lazy_stream.stream.get(),
@@ -976,7 +921,7 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     const UInt32 docs_per_large_block = (static_cast<UInt32>(index_params.posting_list_block_size) + 127) & ~127;
     const UInt32 large_doc_count = doc_count - 1;
     const UInt32 num_large_blocks = (large_doc_count + docs_per_large_block - 1) / docs_per_large_block;
-    LargePostingBlockWriter block_writer(wb, stream.plain_hashing, docs_per_large_block);
+    LargePostingBlockWriter block_writer(wb, stream.plain_hashing, docs_per_large_block, true /* write_block_index */);
 
     UInt32 buffered = 0;
     auto flush128 = [&]()
@@ -1043,11 +988,7 @@ void PostingListStream::collect(UInt32 * buf) const
     for (const auto & lazy_stream : lazy_posting_stream->streams)
     {
         chassert(!lazy_stream.large_posting_blocks.empty());
-        /// Seek to the first large block and skip its Index Section to position
-        /// at the Data Section start.
         lazy_stream.stream->seek(lazy_stream.large_posting_blocks.front().offset);
-        auto & data_buf = *lazy_stream.stream->getDataBuffer();
-        skipIndexSection(data_buf);
 
         cursors.emplace_back(
             lazy_stream.stream.get(),
