@@ -288,9 +288,76 @@ SELECT * FROM tab_dr WHERE hasAnyTokens(text, ['hello', 'bar']) ORDER BY k;
 SET query_plan_direct_read_from_text_index = 0;
 
 ----------------------------------------------------
+SELECT 'Test lazy mode with large posting list and block-level index';
+
+DROP TABLE IF EXISTS tab_block_idx;
+
+-- Use small posting_list_block_size (256) to trigger multiple large blocks with fewer rows.
+-- This exercises the v2 block-level index layout where each large block has a trailing index section.
+CREATE TABLE tab_block_idx(k UInt64, s String, PROJECTION af INDEX s TYPE text(tokenizer = 'splitByNonAlpha', posting_list_block_size = 256))
+    ENGINE = MergeTree() ORDER BY k
+    SETTINGS index_granularity = 8192, index_granularity_bytes = '10Mi';
+
+INSERT INTO tab_block_idx SELECT number, concat('token_', toString(number % 10), ' word_', toString(number)) FROM numbers(500);
+
+SET text_index_posting_list_apply_mode = 'lazy';
+SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token_0');
+
+SET text_index_posting_list_apply_mode = 'materialize';
+SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token_0');
+
+SET text_index_posting_list_apply_mode = 'lazy';
+SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token_5');
+
+SET text_index_posting_list_apply_mode = 'materialize';
+SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token_5');
+
+-- AND intersection with block-level index
+SET text_index_posting_list_apply_mode = 'lazy';
+SELECT count() FROM tab_block_idx WHERE hasAllTokens(s, ['token_3', 'word_3']);
+
+SET text_index_posting_list_apply_mode = 'materialize';
+SELECT count() FROM tab_block_idx WHERE hasAllTokens(s, ['token_3', 'word_3']);
+
+-- OR union with block-level index
+SET text_index_posting_list_apply_mode = 'lazy';
+SELECT count() FROM tab_block_idx WHERE hasAnyTokens(s, ['word_0', 'word_1', 'word_2']);
+
+SET text_index_posting_list_apply_mode = 'materialize';
+SELECT count() FROM tab_block_idx WHERE hasAnyTokens(s, ['word_0', 'word_1', 'word_2']);
+
+----------------------------------------------------
+SELECT 'Test lazy mode with large posting list block-level index after merge';
+
+DROP TABLE IF EXISTS tab_block_merge;
+
+CREATE TABLE tab_block_merge(k UInt64, s String, PROJECTION af INDEX s TYPE text(tokenizer = 'splitByNonAlpha', posting_list_block_size = 256))
+    ENGINE = MergeTree() ORDER BY k
+    SETTINGS index_granularity = 8192, index_granularity_bytes = '10Mi';
+
+INSERT INTO tab_block_merge SELECT number, concat('token_', toString(number % 10), ' word_', toString(number)) FROM numbers(250);
+INSERT INTO tab_block_merge SELECT number + 250, concat('token_', toString((number + 250) % 10), ' word_', toString(number + 250)) FROM numbers(250);
+
+OPTIMIZE TABLE tab_block_merge FINAL;
+
+SET text_index_posting_list_apply_mode = 'lazy';
+SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token_0');
+
+SET text_index_posting_list_apply_mode = 'materialize';
+SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token_0');
+
+SET text_index_posting_list_apply_mode = 'lazy';
+SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token_5');
+
+SET text_index_posting_list_apply_mode = 'materialize';
+SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token_5');
+
+----------------------------------------------------
 DROP TABLE IF EXISTS tab_mode;
 DROP TABLE IF EXISTS tab_merge;
 DROP TABLE IF EXISTS tab_large;
 DROP TABLE IF EXISTS tab_multi;
 DROP TABLE IF EXISTS tab_utf8;
 DROP TABLE IF EXISTS tab_dr;
+DROP TABLE IF EXISTS tab_block_idx;
+DROP TABLE IF EXISTS tab_block_merge;
