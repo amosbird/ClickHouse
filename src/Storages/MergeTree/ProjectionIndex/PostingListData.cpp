@@ -12,7 +12,7 @@
 
 #include <fmt/ranges.h>
 #include <turbopfor.h>
-
+#pragma clang optimize off
 namespace DB
 {
 
@@ -350,14 +350,14 @@ public:
 private:
     void flushLargeBlock()
     {
-        UInt64 offset_for_dictionary = large_block_start_offset;
+        /// V1/V2 shared: offset_in_lpst always points to Data Section start
+        VarInt::writeVarUInt32(current_block_last_doc_id, meta_out);
+        writeVarUInt(large_block_start_offset, meta_out);
 
         if (write_block_index)
         {
             /// Data Section is already written to data_out. Now append the Index Section.
-            /// Record the Index Section start offset — this is what goes into the dictionary stream
-            /// so that the V2 reader can seek directly to the Index Section.
-            offset_for_dictionary = data_out.count();
+            UInt64 index_section_offset = data_out.count();
 
             UInt32 num_packed_blocks = static_cast<UInt32>(packed_block_last_doc_ids.size());
 
@@ -373,13 +373,10 @@ private:
 
             packed_block_last_doc_ids.clear();
             packed_block_offsets.clear();
-        }
 
-        /// Write `(last_doc_id, offset)` to dictionary stream.
-        /// V1 (write_block_index=false): offset points to Data Section start.
-        /// V2 (write_block_index=true): offset points to Index Section start.
-        VarInt::writeVarUInt32(current_block_last_doc_id, meta_out);
-        writeVarUInt(offset_for_dictionary, meta_out);
+            /// Write index_offset_in_lpst to dictionary stream (V2 only).
+            writeVarUInt(index_section_offset, meta_out);
+        }
 
         /// Reset for next large block.
         docs_in_current_block = 0;
@@ -740,33 +737,6 @@ void mergePostingCursors(std::vector<ReaderStreamCursor> & cursors, EmitFirst &&
     }
 }
 
-/// For v2 format, the dictionary offset points to the Index Section (not the Data Section).
-/// This function reads the Index Section to find the Data Section start offset.
-/// For v1 format, the offset already points to the Data Section.
-UInt64 resolveDataSectionOffset(
-    LargePostingListReaderStream & stream, UInt64 offset, size_t format_version)
-{
-    if (!postingListFormatHasBlockIndex(format_version))
-        return offset;
-
-    stream.seek(offset);
-    auto & data_buf = *stream.getDataBuffer();
-
-    /// Read Index Section header: [num_packed_blocks]
-    UInt32 num_packed_blocks;
-    VarInt::readVarUInt32(num_packed_blocks, data_buf);
-    /// Skip N × last_doc_ids
-    for (UInt32 j = 0; j < num_packed_blocks; ++j)
-    {
-        UInt32 dummy;
-        VarInt::readVarUInt32(dummy, data_buf);
-    }
-    /// Read the first packed_block_offset — this is the Data Section start
-    UInt64 data_section_start;
-    readVarUInt(data_section_start, data_buf);
-    return data_section_start;
-}
-
 PostingListPtr ReaderStreamEntry::materializeLargeBlockIntoBitmap(
     LargePostingListReaderStream & stream, UInt32 last_doc_id, UInt32 block_doc_count, UInt64 offset, bool include_first_doc)
 {
@@ -792,7 +762,7 @@ PostingListPtr ReaderStreamEntry::materializeLargeBlockIntoBitmap(
 
 std::string LargePostingBlockMeta::toString() const
 {
-    return fmt::format("{{last_doc_id: {}, block_doc_count: {}, offset: {}}}", last_doc_id, block_doc_count, offset);
+    return fmt::format("{{last_doc_id: {}, block_doc_count: {}, offset: {}, index_offset: {}}}", last_doc_id, block_doc_count, offset, index_offset);
 }
 
 std::string ReaderStreamEntry::toString() const
@@ -891,7 +861,11 @@ void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStream
         VarInt::readVarUInt32(id, in);
         readVarUInt(offset, in);
 
-        large_posting_blocks.emplace_back(id, docs_in_large_block, offset);
+        UInt64 index_offset = 0;
+        if (postingListFormatHasBlockIndex(format_version))
+            readVarUInt(index_offset, in);
+
+        large_posting_blocks.emplace_back(id, docs_in_large_block, offset, index_offset);
         remaining_docs -= docs_in_large_block;
     }
 
@@ -942,18 +916,27 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     for (const auto & lazy_stream : lazy_posting_stream->streams)
     {
         chassert(!lazy_stream.large_posting_blocks.empty());
-        UInt64 data_offset = resolveDataSectionOffset(
-            *lazy_stream.stream, lazy_stream.large_posting_blocks.front().offset,
-            lazy_posting_stream->streams.format_version);
-        lazy_stream.stream->seek(data_offset);
+        const auto & blocks = lazy_stream.large_posting_blocks;
 
-        cursors.emplace_back(
-            lazy_stream.stream.get(),
-            lazy_stream.first_doc_id,
-            lazy_stream.doc_count - 1, /* remaining doc counts */
-            static_cast<UInt64>(lazy_stream.stream->getPosition()),
-            false,
-            true);
+        /// In the new V2 design, offset always points to Data Section start (same as V1).
+        /// Each large block may have an Index Section after Data Section, but since we read
+        /// sequentially, we must create separate cursors per block to avoid reading into
+        /// the Index Section of the preceding block.
+        for (size_t bi = 0; bi < blocks.size(); ++bi)
+        {
+            lazy_stream.stream->seek(blocks[bi].offset);
+
+            bool is_first_block = (bi == 0);
+            UInt32 delta_base = is_first_block ? lazy_stream.first_doc_id : blocks[bi - 1].last_doc_id;
+
+            cursors.emplace_back(
+                lazy_stream.stream.get(),
+                delta_base,
+                blocks[bi].block_doc_count,
+                static_cast<UInt64>(lazy_stream.stream->getPosition()),
+                true, /* do_seek — needed because blocks are not contiguous when Index Sections are interleaved */
+                is_first_block);
+        }
     }
 
     UInt32 last_doc_id;
@@ -1030,18 +1013,23 @@ void PostingListStream::collect(UInt32 * buf) const
     for (const auto & lazy_stream : lazy_posting_stream->streams)
     {
         chassert(!lazy_stream.large_posting_blocks.empty());
-        UInt64 data_offset = resolveDataSectionOffset(
-            *lazy_stream.stream, lazy_stream.large_posting_blocks.front().offset,
-            lazy_posting_stream->streams.format_version);
-        lazy_stream.stream->seek(data_offset);
+        const auto & blocks = lazy_stream.large_posting_blocks;
 
-        cursors.emplace_back(
-            lazy_stream.stream.get(),
-            lazy_stream.first_doc_id,
-            lazy_stream.doc_count - 1, /* remaining doc counts */
-            static_cast<UInt64>(lazy_stream.stream->getPosition()),
-            false,
-            true);
+        for (size_t bi = 0; bi < blocks.size(); ++bi)
+        {
+            lazy_stream.stream->seek(blocks[bi].offset);
+
+            bool is_first_block = (bi == 0);
+            UInt32 delta_base = is_first_block ? lazy_stream.first_doc_id : blocks[bi - 1].last_doc_id;
+
+            cursors.emplace_back(
+                lazy_stream.stream.get(),
+                delta_base,
+                blocks[bi].block_doc_count,
+                static_cast<UInt64>(lazy_stream.stream->getPosition()),
+                true,
+                is_first_block);
+        }
     }
 
     UInt32 buffered = 0;

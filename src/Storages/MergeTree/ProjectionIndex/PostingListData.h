@@ -86,13 +86,15 @@ struct LargePostingBlockMeta
 {
     UInt32 last_doc_id;
     UInt32 block_doc_count;
-    UInt64 offset;
+    UInt64 offset;           /// Data Section start offset (shared by v1 and v2)
+    UInt64 index_offset;     /// Index Section start offset (v2 only; 0 for v1)
 
     /// Default constructor (required by std::vector, resize, etc.)
     LargePostingBlockMeta() noexcept
         : last_doc_id(0)
         , block_doc_count(0)
         , offset(0)
+        , index_offset(0)
     {
     }
 
@@ -101,14 +103,25 @@ struct LargePostingBlockMeta
         : last_doc_id(0)
         , block_doc_count(0)
         , offset(offset_)
+        , index_offset(0)
     {
     }
 
-    /// Fully initialized constructor
+    /// Fully initialized constructor (v1 compatible)
     LargePostingBlockMeta(UInt32 last_doc_id_, UInt32 doc_count_, UInt64 offset_) noexcept
         : last_doc_id(last_doc_id_)
         , block_doc_count(doc_count_)
         , offset(offset_)
+        , index_offset(0)
+    {
+    }
+
+    /// Fully initialized constructor (v2 with index_offset)
+    LargePostingBlockMeta(UInt32 last_doc_id_, UInt32 doc_count_, UInt64 offset_, UInt64 index_offset_) noexcept
+        : last_doc_id(last_doc_id_)
+        , block_doc_count(doc_count_)
+        , offset(offset_)
+        , index_offset(index_offset_)
     {
     }
 
@@ -139,12 +152,6 @@ struct ReaderStreamEntry
 
     String toString() const;
 };
-
-/// For v2 format, the dictionary offset points to the Index Section (not the Data Section).
-/// This function reads the Index Section to find the Data Section start offset.
-/// For v1 format, the offset already points to the Data Section.
-UInt64 resolveDataSectionOffset(
-    LargePostingListReaderStream & stream, UInt64 offset, size_t format_version);
 
 struct ReaderStreamVector
 {

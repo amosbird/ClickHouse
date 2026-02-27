@@ -275,9 +275,11 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
 }
 
 PostingListPtr MergeTreeIndexGranuleProjection::materializeFromTokenInfo(
-    LargePostingListReaderStream & stream, const TokenPostingsInfo & token_info, size_t block_idx, size_t format_version)
+    LargePostingListReaderStream & stream, const TokenPostingsInfo & token_info, size_t block_idx, size_t /*format_version*/)
 {
-    UInt64 offset = resolveDataSectionOffset(stream, token_info.offsets[block_idx].offset, format_version);
+    /// In the new V2 design, offset always points to Data Section start (same as V1).
+    /// No need to call resolveDataSectionOffset.
+    UInt64 offset = token_info.offsets[block_idx].offset;
 
     /// For delta-decoding:
     /// - First block: 'begin' is the first doc_id (include it).

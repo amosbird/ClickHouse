@@ -4,6 +4,7 @@
 #include <Common/ElapsedTimeProfileEventIncrement.h>
 #include <IO/ReadHelpers.h>
 
+#pragma clang optimize off
 #include <turbopfor.h>
 
 namespace DB
@@ -162,9 +163,10 @@ void PostingListCursor::prepare(size_t large_block_idx)
     UInt32 range_span = static_cast<UInt32>(range.end) - static_cast<UInt32>(range.begin) + 1;
     density_val = (range_span > 0) ? static_cast<double>(large_block_doc_count + (large_block_idx == 0 ? 1 : 0)) / static_cast<double>(range_span) : 1.0;
 
-    /// In V2 format, block_meta.offset points directly to the Index Section
-    /// (not the Data Section). Seek there and read the packed block index.
-    stream->seek(block_meta.offset);
+    /// In V2 format, block_meta.index_offset points to the Index Section.
+    /// Seek there and read the packed block index.
+    chassert(block_meta.index_offset != 0);
+    stream->seek(block_meta.index_offset);
     auto & data_buf = *stream->getDataBuffer();
 
     /// Read Index Section: [num_packed_blocks] [last_doc_ids...] [offsets...]
