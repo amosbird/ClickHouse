@@ -90,7 +90,6 @@ PostingListCursor::PostingListCursor(LargePostingListReaderStream * stream_, con
     : stream(stream_)
     , info(info_)
 {
-    current_values.reserve(TURBOPFOR_BLOCK_SIZE);
     large_blocks.push_back(large_block);
     prepare(large_block);
 }
@@ -115,7 +114,11 @@ void PostingListCursor::prepare(size_t large_block_idx)
     if (current_large_block_idx == large_block_idx && current_large_block_idx != std::numeric_limits<size_t>::max())
         return;
 
-    current_values.reserve(TURBOPFOR_BLOCK_SIZE);
+    /// Large block 0's packed block 0 needs to prepend `first_doc_id` (which is stored
+    /// separately in the dictionary stream and not included in TurboPFor encoding), so
+    /// reserve one extra slot to avoid reallocation during decodeNextBlock.
+    current_values.reserve(TURBOPFOR_BLOCK_SIZE + (large_block_idx == 0 ? 1 : 0));
+    current_values.clear();
 
     if (info.embedded_postings)
     {
@@ -145,7 +148,6 @@ void PostingListCursor::prepare(size_t large_block_idx)
 
     const auto & block_meta = info.offsets[large_block_idx];
     large_block_doc_count = block_meta.block_doc_count;
-    last_decoded_doc_id = static_cast<UInt32>(info.ranges[large_block_idx].begin);
 
     /// Compute packed block structure for the delta-encoded portion
     size_t full_blocks = large_block_doc_count / TURBOPFOR_BLOCK_SIZE;
@@ -160,7 +162,6 @@ void PostingListCursor::prepare(size_t large_block_idx)
     UInt32 range_span = static_cast<UInt32>(range.end) - static_cast<UInt32>(range.begin) + 1;
     density_val = (range_span > 0) ? static_cast<double>(large_block_doc_count + (large_block_idx == 0 ? 1 : 0)) / static_cast<double>(range_span) : 1.0;
 
-    /// --- V2: Load Index Session ---
     /// In V2 format, block_meta.offset points directly to the Index Section
     /// (not the Data Section). Seek there and read the packed block index.
     stream->seek(block_meta.offset);
@@ -197,7 +198,11 @@ bool PostingListCursor::decodeNextBlock()
 
     /// Compute delta base for the target packed block.
     if (current_block == 0)
+    {
         last_decoded_doc_id = static_cast<UInt32>(info.ranges[current_large_block_idx].begin);
+        if (current_large_block_idx > 0)
+            --last_decoded_doc_id;
+    }
     else
         last_decoded_doc_id = packed_block_last_doc_ids[current_block - 1];
 
@@ -222,13 +227,25 @@ bool PostingListCursor::decodeNextBlock()
         src_ptr = stream->packed_buffer;
     }
 
-    current_values.resize(count);
-    if (count == 128)
-        turbopfor::p4D1Dec128v32(src_ptr, 128, current_values.data(), last_decoded_doc_id);
-    else
-        turbopfor::p4D1Dec32(src_ptr, count, current_values.data(), last_decoded_doc_id);
+    /// `first_doc_id` is stored separately in the dictionary stream and is NOT included
+    /// in the TurboPFor-encoded packed blocks. For large block 0's packed block 0, we need
+    /// to prepend it manually: resize to `count + 1`, decode into offset 1, then fill slot 0.
+    /// This mirrors the old `ReaderStreamCursor` logic with `include_first_doc = true`.
+    bool prepend_first_doc_id = (current_large_block_idx == 0 && current_block == 0);
+    UInt32 actual_count = prepend_first_doc_id ? count + 1 : count;
 
-    last_decoded_doc_id = current_values[count - 1];
+    current_values.resize(actual_count);
+    uint32_t * decode_dst = current_values.data() + (prepend_first_doc_id ? 1 : 0);
+
+    if (count == 128)
+        turbopfor::p4D1Dec128v32(src_ptr, 128, decode_dst, last_decoded_doc_id);
+    else
+        turbopfor::p4D1Dec32(src_ptr, count, decode_dst, last_decoded_doc_id);
+
+    if (prepend_first_doc_id)
+        current_values[0] = static_cast<uint32_t>(info.ranges[0].begin);
+
+    last_decoded_doc_id = current_values[actual_count - 1];
     index = 0;
 
     return true;
@@ -280,8 +297,7 @@ bool PostingListCursor::seekImpl(uint32_t target)
         return false;
     }
 
-    /// V2: use packed block index for O(log N) random access within the large block.
-
+    /// Use packed block index for O(log N) random access within the large block.
     /// First check if target is in the current decoded block
     if (index < current_values.size())
     {
@@ -390,14 +406,9 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
     /// Process the current already-decoded block, then decode subsequent blocks sequentially.
     for (size_t blk = current_block; blk < block_count; ++blk)
     {
-        /// For the first iteration, current_values already has the decoded block.
-        /// For subsequent iterations, decode the next block from the stream.
-        if (blk > current_block)
-        {
-            current_block = blk;
-            if (!decodeNextBlock())
-                return;
-        }
+        current_block = blk;
+        if (!decodeNextBlock())
+            return;
 
         if (current_values.empty())
             continue;
@@ -494,12 +505,9 @@ void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out
     /// Process the current already-decoded block, then decode subsequent blocks sequentially.
     for (size_t blk = current_block; blk < block_count; ++blk)
     {
-        if (blk > current_block)
-        {
-            current_block = blk;
-            if (!decodeNextBlock())
-                return;
-        }
+        current_block = blk;
+        if (!decodeNextBlock())
+            return;
 
         if (current_values.empty())
             continue;

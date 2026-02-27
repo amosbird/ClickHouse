@@ -96,9 +96,6 @@ private:
         chassert(static_cast<size_t>(unused_large_block_index) < large_blocks.size());
         if (unused_large_block_index >= 0 && large_blocks.size() > 1)
         {
-            auto end = large_blocks.begin() + unused_large_block_index + 1;
-            for (auto it = large_blocks.begin(); it < end; ++it)
-                seen_large_blocks.erase(*it);
             large_blocks.erase(large_blocks.begin(), large_blocks.begin() + unused_large_block_index + 1);
         }
     }
@@ -123,7 +120,7 @@ private:
     /// Last decoded doc_id (for delta decoding continuity)
     UInt32 last_decoded_doc_id = 0;
 
-    /// V2 Index Session for the current large block: packed block level index
+    /// V2 Index section for the current large block: packed block level index
     /// loaded in `prepare`, enables O(log N) seek within a large block.
     /// `packed_block_last_doc_ids[j]` is the last doc_id of the j-th 128-doc packed block.
     /// `packed_block_offsets[j]` is the absolute byte offset of the j-th packed block in .lpst.
@@ -132,7 +129,6 @@ private:
 
     /// Large blocks this cursor covers (indexes into info.offsets / info.ranges)
     std::vector<size_t> large_blocks;
-    std::unordered_set<size_t> seen_large_blocks;
     size_t current_large_block_idx = std::numeric_limits<size_t>::max();
 
     bool is_valid = true;
