@@ -518,6 +518,19 @@ struct ReaderStreamCursor
     UInt64 offset;
     bool do_seek;
 
+    /// V2 large block boundary tracking: when Index Sections are interleaved
+    /// between Data Sections, we need to skip over them during sequential reads.
+    /// Each entry is (docs_remaining_in_this_block, next_block_data_offset).
+    /// When `remaining_in_large_block` hits 0, seek to the next block's offset.
+    struct LargeBlockSkip
+    {
+        UInt32 doc_count;
+        UInt64 next_data_offset; /// 0 means last block, no skip needed
+    };
+    std::vector<LargeBlockSkip> large_block_skips;
+    size_t current_large_block = 0;
+    UInt32 remaining_in_large_block = 0;
+
     /// Disk-based c'tor
     ReaderStreamCursor(
         LargePostingListReaderStream * s,
@@ -565,6 +578,22 @@ struct ReaderStreamCursor
         , do_seek(false)
     {
         chassert(doc_buffer);
+    }
+
+    /// Set up large block skip schedule for V2 format.
+    /// `blocks` contains per-large-block metadata; when a large block's Data Section
+    /// is fully consumed, the cursor seeks past its Index Section to the next block's
+    /// Data Section offset.
+    void setLargeBlockSkips(const LargePostingBlockMetas & blocks)
+    {
+        large_block_skips.resize(blocks.size());
+        for (size_t i = 0; i < blocks.size(); ++i)
+        {
+            large_block_skips[i].doc_count = blocks[i].block_doc_count;
+            large_block_skips[i].next_data_offset = (i + 1 < blocks.size()) ? blocks[i + 1].offset : 0;
+        }
+        current_large_block = 0;
+        remaining_in_large_block = blocks.empty() ? 0 : blocks[0].block_doc_count;
     }
 
     UInt32 ALWAYS_INLINE current() const
@@ -645,6 +674,24 @@ private:
         if (remaining_count == 0)
             return;
 
+        /// V2 large block boundary: if we've consumed all docs in the current
+        /// large block, skip over the trailing Index Section by seeking to the
+        /// next large block's Data Section offset.
+        if (!large_block_skips.empty() && remaining_in_large_block == 0)
+        {
+            ++current_large_block;
+            chassert(current_large_block < large_block_skips.size());
+            remaining_in_large_block = large_block_skips[current_large_block].doc_count;
+
+            /// Seek past the Index Section to the next Data Section
+            UInt64 next_offset = large_block_skips[current_large_block - 1].next_data_offset;
+            if (next_offset != 0)
+            {
+                stream->seek(next_offset);
+                do_seek = false;
+            }
+        }
+
         if (do_seek)
         {
             stream->seek(offset);
@@ -677,6 +724,10 @@ private:
         remaining_count -= count;
         buf_size = count;
         pos = 0;
+
+        if (!large_block_skips.empty())
+            remaining_in_large_block -= count;
+
         if (stream->merged_part_offsets)
             stream->merged_part_offsets->mapOffsets(stream->part_index, doc_buffer, count);
     }
@@ -918,25 +969,21 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
         chassert(!lazy_stream.large_posting_blocks.empty());
         const auto & blocks = lazy_stream.large_posting_blocks;
 
-        /// In the new V2 design, offset always points to Data Section start (same as V1).
-        /// Each large block may have an Index Section after Data Section, but since we read
-        /// sequentially, we must create separate cursors per block to avoid reading into
-        /// the Index Section of the preceding block.
-        for (size_t bi = 0; bi < blocks.size(); ++bi)
-        {
-            lazy_stream.stream->seek(blocks[bi].offset);
+        lazy_stream.stream->seek(blocks.front().offset);
 
-            bool is_first_block = (bi == 0);
-            UInt32 delta_base = is_first_block ? lazy_stream.first_doc_id : blocks[bi - 1].last_doc_id;
+        cursors.emplace_back(
+            lazy_stream.stream.get(),
+            lazy_stream.first_doc_id,
+            lazy_stream.doc_count - 1, /* remaining doc count (first doc is inline) */
+            static_cast<UInt64>(lazy_stream.stream->getPosition()),
+            false,
+            true);
 
-            cursors.emplace_back(
-                lazy_stream.stream.get(),
-                delta_base,
-                blocks[bi].block_doc_count,
-                static_cast<UInt64>(lazy_stream.stream->getPosition()),
-                true, /* do_seek — needed because blocks are not contiguous when Index Sections are interleaved */
-                is_first_block);
-        }
+        /// In V2 format, Index Sections are interleaved between Data Sections.
+        /// Set up skip schedule so the cursor seeks past each Index Section
+        /// at large block boundaries.
+        if (postingListFormatHasBlockIndex(lazy_posting_stream->streams.format_version))
+            cursors.back().setLargeBlockSkips(blocks);
     }
 
     UInt32 last_doc_id;
@@ -1015,21 +1062,18 @@ void PostingListStream::collect(UInt32 * buf) const
         chassert(!lazy_stream.large_posting_blocks.empty());
         const auto & blocks = lazy_stream.large_posting_blocks;
 
-        for (size_t bi = 0; bi < blocks.size(); ++bi)
-        {
-            lazy_stream.stream->seek(blocks[bi].offset);
+        lazy_stream.stream->seek(blocks.front().offset);
 
-            bool is_first_block = (bi == 0);
-            UInt32 delta_base = is_first_block ? lazy_stream.first_doc_id : blocks[bi - 1].last_doc_id;
+        cursors.emplace_back(
+            lazy_stream.stream.get(),
+            lazy_stream.first_doc_id,
+            lazy_stream.doc_count - 1,
+            static_cast<UInt64>(lazy_stream.stream->getPosition()),
+            false,
+            true);
 
-            cursors.emplace_back(
-                lazy_stream.stream.get(),
-                delta_base,
-                blocks[bi].block_doc_count,
-                static_cast<UInt64>(lazy_stream.stream->getPosition()),
-                true,
-                is_first_block);
-        }
+        if (postingListFormatHasBlockIndex(lazy_posting_stream->streams.format_version))
+            cursors.back().setLargeBlockSkips(blocks);
     }
 
     UInt32 buffered = 0;
