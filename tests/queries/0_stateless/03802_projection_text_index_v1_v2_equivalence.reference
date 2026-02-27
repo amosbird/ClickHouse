@@ -1,0 +1,71 @@
+Part 1: Small data
+hasToken apple
+100
+100
+hasToken cherry
+100
+100
+hasToken elderberry
+100
+100
+AND intersection (empty)
+0
+0
+AND same group
+100
+100
+OR union
+200
+200
+non-existent token
+0
+0
+row values
+0	apple banana
+3	apple banana
+6	apple banana
+9	apple banana
+12	apple banana
+0	apple banana
+3	apple banana
+6	apple banana
+9	apple banana
+12	apple banana
+Part 2: Large data (triggers large posting list path)
+large: hasToken common
+2000
+2000
+large: hasToken rare
+1000
+1000
+large: hasToken frequent
+1000
+1000
+large: AND common AND frequent
+1000
+1000
+large: AND common AND rare (empty)
+0
+0
+large: OR rare OR unique
+3000
+3000
+large: 3-way AND common AND medium (not frequent)
+1000
+1000
+Part 3: After merge
+after merge: hasToken alpha
+2000
+2000
+after merge: hasToken beta
+2000
+2000
+after merge: AND alpha AND beta (empty)
+0
+0
+after merge: AND merge AND alpha
+2000
+2000
+after merge: OR alpha OR beta
+4000
+4000
