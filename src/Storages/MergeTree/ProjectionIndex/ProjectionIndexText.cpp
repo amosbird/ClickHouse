@@ -68,7 +68,7 @@ void ProjectionIndexText::fillProjectionDescription(
     result.type = ProjectionDescription::Type::Aggregate;
     result.sample_block_for_keys.insert({ColumnString::create(), std::make_shared<DataTypeString>(), "term"});
     auto posting_list_type
-        = createPostingListType(index_ast->as<ASTIndexDeclaration>()->getType()->arguments, POSTING_LIST_FORMAT_VERSION_INITIAL);
+        = createPostingListType(index_ast->as<ASTIndexDeclaration>()->getType()->arguments);
     result.sample_block
         = {result.sample_block_for_keys.getByPosition(0), {posting_list_type->createColumn(), posting_list_type, "posting"}};
 

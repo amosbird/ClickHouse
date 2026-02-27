@@ -5,6 +5,7 @@
 #include <Storages/MergeTree/MergeTreeDataPartWriterOnDisk.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergedPartOffsets.h>
+#include <Storages/MergeTree/ProjectionIndex/PostingListState.h>
 #include <base/scope_guard.h>
 #include <Common/Arena.h>
 #include <Common/Exception.h>
@@ -453,7 +454,8 @@ void PostingListWriter::finish(
     chassert(num_large_blocks >= 1);
     VarInt::writeVarUInt32(num_large_blocks, wb);
 
-    LargePostingBlockWriter block_writer(wb, large_posting, docs_per_large_block, true /* write_block_index */);
+    LargePostingBlockWriter block_writer(wb, large_posting, docs_per_large_block,
+        postingListFormatHasBlockIndex(resolvePostingListFormatVersion(index_params.posting_list_version)));
 
     /// Iterate packed 128-doc chunks
     PostingListChunk * it = blocks_head;
@@ -502,6 +504,9 @@ void ReaderStreamVector::merge(const ReaderStreamVector & other)
         }
         entries.emplace_back(oe);
     }
+    /// Propagate format_version from the other side if this side has no entries yet.
+    if (format_version == 0 && other.format_version != 0)
+        format_version = other.format_version;
 }
 
 struct ReaderStreamCursor
@@ -735,6 +740,33 @@ void mergePostingCursors(std::vector<ReaderStreamCursor> & cursors, EmitFirst &&
     }
 }
 
+/// For v2 format, the dictionary offset points to the Index Section (not the Data Section).
+/// This function reads the Index Section to find the Data Section start offset.
+/// For v1 format, the offset already points to the Data Section.
+UInt64 resolveDataSectionOffset(
+    LargePostingListReaderStream & stream, UInt64 offset, size_t format_version)
+{
+    if (!postingListFormatHasBlockIndex(format_version))
+        return offset;
+
+    stream.seek(offset);
+    auto & data_buf = *stream.getDataBuffer();
+
+    /// Read Index Section header: [num_packed_blocks]
+    UInt32 num_packed_blocks;
+    VarInt::readVarUInt32(num_packed_blocks, data_buf);
+    /// Skip N × last_doc_ids
+    for (UInt32 j = 0; j < num_packed_blocks; ++j)
+    {
+        UInt32 dummy;
+        VarInt::readVarUInt32(dummy, data_buf);
+    }
+    /// Read the first packed_block_offset — this is the Data Section start
+    UInt64 data_section_start;
+    readVarUInt(data_section_start, data_buf);
+    return data_section_start;
+}
+
 PostingListPtr ReaderStreamEntry::materializeLargeBlockIntoBitmap(
     LargePostingListReaderStream & stream, UInt32 last_doc_id, UInt32 block_doc_count, UInt64 offset, bool include_first_doc)
 {
@@ -799,7 +831,7 @@ LazyPostingStream::LazyPostingStream(const UInt32 * embedded_postings, UInt32 nu
 
 LazyPostingStream::~LazyPostingStream() = default;
 
-void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStreamPtr & stream, const MergeTreeIndexTextParams & index_params)
+void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStreamPtr & stream, const MergeTreeIndexTextParams & index_params, size_t format_version)
 {
     VarInt::readVarUInt32(doc_count, in);
     if (doc_count == 0)
@@ -865,6 +897,7 @@ void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStream
 
     lazy_posting_stream = std::make_unique<LazyPostingStream>(
         nullptr, 0, ReaderStreamVector{stream, last_doc_id, doc_count, std::move(large_posting_blocks)});
+    lazy_posting_stream->streams.format_version = format_version;
 }
 
 void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & stream, const MergeTreeIndexTextParams & index_params) const
@@ -909,7 +942,10 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     for (const auto & lazy_stream : lazy_posting_stream->streams)
     {
         chassert(!lazy_stream.large_posting_blocks.empty());
-        lazy_stream.stream->seek(lazy_stream.large_posting_blocks.front().offset);
+        UInt64 data_offset = resolveDataSectionOffset(
+            *lazy_stream.stream, lazy_stream.large_posting_blocks.front().offset,
+            lazy_posting_stream->streams.format_version);
+        lazy_stream.stream->seek(data_offset);
 
         cursors.emplace_back(
             lazy_stream.stream.get(),
@@ -926,7 +962,8 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     const UInt32 docs_per_large_block = (static_cast<UInt32>(index_params.posting_list_block_size) + 127) & ~127;
     const UInt32 large_doc_count = doc_count - 1;
     const UInt32 num_large_blocks = (large_doc_count + docs_per_large_block - 1) / docs_per_large_block;
-    LargePostingBlockWriter block_writer(wb, stream.plain_hashing, docs_per_large_block, true /* write_block_index */);
+    LargePostingBlockWriter block_writer(wb, stream.plain_hashing, docs_per_large_block,
+        postingListFormatHasBlockIndex(resolvePostingListFormatVersion(index_params.posting_list_version)));
 
     UInt32 buffered = 0;
     auto flush128 = [&]()
@@ -993,7 +1030,10 @@ void PostingListStream::collect(UInt32 * buf) const
     for (const auto & lazy_stream : lazy_posting_stream->streams)
     {
         chassert(!lazy_stream.large_posting_blocks.empty());
-        lazy_stream.stream->seek(lazy_stream.large_posting_blocks.front().offset);
+        UInt64 data_offset = resolveDataSectionOffset(
+            *lazy_stream.stream, lazy_stream.large_posting_blocks.front().offset,
+            lazy_posting_stream->streams.format_version);
+        lazy_stream.stream->seek(data_offset);
 
         cursors.emplace_back(
             lazy_stream.stream.get(),

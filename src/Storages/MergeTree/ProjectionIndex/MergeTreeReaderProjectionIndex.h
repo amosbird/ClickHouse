@@ -40,9 +40,6 @@ private:
         size_t row_offset,
         size_t num_rows);
 
-    /// Whether to use lazy posting list apply mode.
-    bool use_lazy_mode = false;
-
     /// Lazily-built cursor map, shared across all marks in the part.
     PostingListCursorMap cursor_map;
     bool cursor_map_built = false;

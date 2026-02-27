@@ -140,9 +140,16 @@ struct ReaderStreamEntry
     String toString() const;
 };
 
+/// For v2 format, the dictionary offset points to the Index Section (not the Data Section).
+/// This function reads the Index Section to find the Data Section start offset.
+/// For v1 format, the offset already points to the Data Section.
+UInt64 resolveDataSectionOffset(
+    LargePostingListReaderStream & stream, UInt64 offset, size_t format_version);
+
 struct ReaderStreamVector
 {
     std::vector<ReaderStreamEntry> entries;
+    size_t format_version = 0;
 
     ReaderStreamVector() = default;
 
@@ -226,7 +233,7 @@ struct alignas(8) PostingListStream
         return *this;
     }
 
-    void read(ReadBuffer & in, const LargePostingListReaderStreamPtr & stream, const MergeTreeIndexTextParams & index_params);
+    void read(ReadBuffer & in, const LargePostingListReaderStreamPtr & stream, const MergeTreeIndexTextParams & index_params, size_t format_version);
 
     void write(WriteBuffer & wb, LargePostingListWriterStream & stream, const MergeTreeIndexTextParams & index_params) const;
 

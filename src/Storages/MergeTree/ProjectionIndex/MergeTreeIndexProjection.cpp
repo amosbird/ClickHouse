@@ -8,6 +8,7 @@
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeDataPartChecksum.h>
 #include <Storages/MergeTree/ProjectionIndex/PostingListData.h>
+#include <Storages/MergeTree/ProjectionIndex/PostingListState.h>
 #include <Storages/MergeTree/ProjectionIndex/ProjectionIndexText.h>
 #include <Storages/MergeTree/TextIndexCache.h>
 #include <Storages/ProjectionsDescription.h>
@@ -163,6 +164,13 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
 
             assert_cast<const ColumnString &>(*result[0]);
             const ColumnAggregateFunction & posting_column = assert_cast<const ColumnAggregateFunction &>(*result[1]);
+
+            /// Extract format version from the aggregate function type.
+            const auto * agg_func = dynamic_cast<const AggregateFunctionPostingList *>(
+                posting_column.getAggregateFunction().get());
+            if (agg_func)
+                posting_list_format_version = agg_func->version;
+
             const auto & data = posting_column.getData();
             const size_t rows = data.size();
             chassert(rows_read == rows);
@@ -256,7 +264,7 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
             const auto load_postings = [&]() -> PostingListPtr
             {
                 ProfileEvents::increment(ProfileEvents::TextIndexReadPostings);
-                return materializeFromTokenInfo(*large_posting_stream, token_info, 0);
+                return materializeFromTokenInfo(*large_posting_stream, token_info, 0, posting_list_format_version);
             };
 
             auto hash = TextIndexPostingsCache::hash(data_path, part->name, token_info.offsets[0].offset);
@@ -267,8 +275,10 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
 }
 
 PostingListPtr MergeTreeIndexGranuleProjection::materializeFromTokenInfo(
-    LargePostingListReaderStream & stream, const TokenPostingsInfo & token_info, size_t block_idx)
+    LargePostingListReaderStream & stream, const TokenPostingsInfo & token_info, size_t block_idx, size_t format_version)
 {
+    UInt64 offset = resolveDataSectionOffset(stream, token_info.offsets[block_idx].offset, format_version);
+
     /// For delta-decoding:
     /// - First block: 'begin' is the first doc_id (include it).
     /// - Other blocks: 'begin - 1' is the baseline to reconstruct 'begin' (exclude it).
@@ -280,7 +290,7 @@ PostingListPtr MergeTreeIndexGranuleProjection::materializeFromTokenInfo(
         stream,
         last_doc_id,
         token_info.offsets[block_idx].block_doc_count,
-        token_info.offsets[block_idx].offset,
+        offset,
         block_idx == 0 /* include_first_doc */);
 }
 

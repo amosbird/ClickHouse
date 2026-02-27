@@ -1,10 +1,9 @@
 #include <Storages/MergeTree/ProjectionIndex/MergeTreeReaderProjectionIndex.h>
 
 #include <Storages/MergeTree/ProjectionIndex/MergeTreeIndexProjection.h>
+#include <Storages/MergeTree/ProjectionIndex/PostingListState.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
 #include <Columns/ColumnsNumber.h>
-#include <Core/Settings.h>
-#include <Interpreters/Context.h>
 #include <Common/ElapsedTimeProfileEventIncrement.h>
 
 namespace ProfileEvents
@@ -14,11 +13,6 @@ namespace ProfileEvents
 
 namespace DB
 {
-
-namespace Setting
-{
-    extern const SettingsString text_index_posting_list_apply_mode;
-}
 
 MergeTreeReaderProjectionIndex::MergeTreeReaderProjectionIndex(
     const IMergeTreeReader * main_reader_, MergeTreeIndexWithCondition index_, NamesAndTypesList columns_, bool can_skip_mark_)
@@ -36,12 +30,6 @@ MergeTreeReaderProjectionIndex::MergeTreeReaderProjectionIndex(
     };
 
     deserialization_state = std::make_unique<MergeTreeIndexDeserializationState>(std::move(state));
-
-    /// Determine apply mode from query settings.
-    const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
-    const auto & settings = condition_text.getContext()->getSettingsRef();
-    String mode = settings[Setting::text_index_posting_list_apply_mode];
-    use_lazy_mode = (mode == "lazy");
 }
 
 PostingListPtr MergeTreeReaderProjectionIndex::readPostingsBlockForToken(
@@ -50,7 +38,8 @@ PostingListPtr MergeTreeReaderProjectionIndex::readPostingsBlockForToken(
     chassert(granule);
     auto & granule_projection = assert_cast<MergeTreeIndexGranuleProjection &>(*granule);
     chassert(granule_projection.large_posting_stream);
-    return MergeTreeIndexGranuleProjection::materializeFromTokenInfo(*granule_projection.large_posting_stream, token_info, block_idx);
+    return MergeTreeIndexGranuleProjection::materializeFromTokenInfo(
+        *granule_projection.large_posting_stream, token_info, block_idx, granule_projection.posting_list_format_version);
 }
 
 PostingListCursorMap MergeTreeReaderProjectionIndex::buildCursorMap()
@@ -131,8 +120,17 @@ size_t MergeTreeReaderProjectionIndex::readRows(
     size_t rows_offset,
     Columns & res_columns)
 {
-    /// In materialize mode, delegate to the base class implementation.
-    if (!use_lazy_mode)
+    /// Determine apply mode from the on-disk posting list format version:
+    /// - V1 (no block index): use materialize mode (base class)
+    /// - V2 (with block index): use lazy cursor-based mode
+    bool use_lazy = false;
+    if (granule)
+    {
+        auto & granule_projection = assert_cast<MergeTreeIndexGranuleProjection &>(*granule);
+        use_lazy = postingListFormatHasBlockIndex(granule_projection.posting_list_format_version);
+    }
+
+    if (!use_lazy)
         return MergeTreeReaderTextIndex::readRows(from_mark, current_task_last_mark, continue_reading, max_rows_to_read, rows_offset, res_columns);
 
     /// Lazy mode: use PostingListCursor-based intersection/union.
