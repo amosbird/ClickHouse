@@ -3,6 +3,7 @@
 #include <Storages/MergeTree/MergeTreeReaderStream.h>
 #include <Common/ElapsedTimeProfileEventIncrement.h>
 #include <IO/ReadHelpers.h>
+#include <algorithm>
 
 #include <turbopfor.h>
 
@@ -106,6 +107,11 @@ PostingListCursor::PostingListCursor(LargePostingListReaderStreamPtr owned_strea
 PostingListCursor::PostingListCursor(const TokenPostingsInfo & info_, size_t large_block)
     : PostingListCursor(nullptr, info_, large_block)
 {
+}
+
+UInt32 PostingListCursor::cardinality() const
+{
+    return info.cardinality;
 }
 
 void PostingListCursor::addLargeBlock(size_t s)
@@ -920,16 +926,25 @@ void lazyIntersectPostingLists(IColumn & column, const PostingListCursorMap & po
         return;
     }
 
-    double density = 0;
+    /// Use min density for algorithm selection: brute-force is only beneficial
+    /// when ALL cursors are dense. If any cursor is sparse, leapfrog can skip
+    /// large ranges efficiently, making it the better choice.
+    double min_density = std::numeric_limits<double>::max();
     for (size_t i = 0; i < n; ++i)
-        density += cursors[i]->density();
-    density = density / static_cast<double>(n);
+        min_density = std::min(min_density, cursors[i]->density());
 
-    if (n < 256 && (density >= density_threshold || brute_force_apply))
+    if (n < 256 && (min_density >= density_threshold || brute_force_apply))
     {
         intersectBruteForce(out, cursors, row_offset, num_rows);
         return;
     }
+
+    /// Sort cursors by cardinality ascending so the sparsest cursor leads
+    /// the leapfrog loop. This minimizes total seek count: the sparse leader
+    /// advances in large jumps while dense followers catch up cheaply.
+    std::sort(cursors.begin(), cursors.end(),
+        [](const PostingListCursorPtr & a, const PostingListCursorPtr & b)
+        { return a->cardinality() < b->cardinality(); });
 
     for (size_t i = 0; i < n; ++i)
     {

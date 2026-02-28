@@ -74,6 +74,10 @@ public:
     /// Used to decide between skip-list vs brute-force algorithm.
     double density() const { return density_val; }
 
+    /// Returns total cardinality of the posting list.
+    /// Used to sort cursors by selectivity for leapfrog intersection.
+    UInt32 cardinality() const;
+
 private:
     static constexpr size_t TURBOPFOR_BLOCK_SIZE = 128;
 
