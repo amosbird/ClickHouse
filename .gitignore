@@ -5,4 +5,7 @@
 *-preprocessed.xml
 obj-x86_64-linux-gnu
 /*.log
-/cache/
+/cache/*
+!/cache/ccache-bin/
+/cache/ccache-bin/*
+!/cache/ccache-bin/ccache

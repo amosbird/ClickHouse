@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# build.sh — Build ClickHouse inside Docker with sccache, build seed, etc.
+# build.sh — Build ClickHouse inside Docker with ccache.
 #
 # Usage:
 #   ./build.sh [WORKTREE_PATH] [OPTIONS]
@@ -13,7 +13,6 @@
 #   --target TGT    Ninja target (default: clickhouse)
 #   --cmake         Force cmake even if build.ninja exists
 #   --no-cmake      Skip cmake, run ninja only
-#   --no-seed       Don't use/update build seed
 #   --cmake-only    Run cmake only, don't build
 #   --shell         Drop into a shell inside the container instead of building
 #
@@ -35,7 +34,6 @@ BUILD_TYPE="release"
 TARGET="clickhouse"
 SKIP_CMAKE=0
 FORCE_CMAKE=0
-NO_SEED=0
 CMAKE_ONLY=0
 SHELL_MODE=0
 
@@ -55,10 +53,6 @@ while [[ $# -gt 0 ]]; do
         ;;
     --cmake)
         FORCE_CMAKE=1
-        shift
-        ;;
-    --no-seed)
-        NO_SEED=1
         shift
         ;;
     --cmake-only)
@@ -98,7 +92,7 @@ WORKTREE_NAME="$(basename "$WORKTREE_PATH")"
 COMMON_FLAGS=(
     -DCMAKE_C_COMPILER=clang-21
     -DCMAKE_CXX_COMPILER=clang++-21
-    -DCOMPILER_CACHE=sccache
+    -DCOMPILER_CACHE=ccache
     -DCMAKE_TOOLCHAIN_FILE=/ClickHouse/cmake/linux/toolchain-x86_64.cmake
     -DENABLE_RUST=0
     -DENABLE_THINLTO=0
@@ -156,9 +150,8 @@ ubsan)
 esac
 
 BUILD_DIR="$WORKTREE_PATH/build"
-SEED_DIR="$REPO_ROOT/cache/builds/$BUILD_TYPE"
-SEED_LOCK="$REPO_ROOT/cache/builds/seed.lock"
-SCCACHE_CACHE="$REPO_ROOT/cache/sccache"
+CCACHE_DIR="$REPO_ROOT/cache/ccache"
+CCACHE_BIN="$REPO_ROOT/cache/ccache-bin/ccache"
 CONTAINER_NAME="build-$WORKTREE_NAME"
 
 echo "=== ClickHouse Build ==="
@@ -166,104 +159,39 @@ echo "  Worktree:   $WORKTREE_PATH"
 echo "  Build type: $BUILD_TYPE"
 echo "  Target:     $TARGET"
 echo "  Build dir:  $BUILD_DIR"
+echo "  ccache:     $CCACHE_DIR"
 echo "  Container:  $CONTAINER_NAME"
 echo ""
 
-# --- Ensure sccache proxy is running ---
-if ! curl -sf http://localhost:8083/ >/dev/null 2>&1; then
-    echo "Starting sccache proxy on port 8083..."
-    nohup python3 "$REPO_ROOT/sccache-proxy.py" \
-        --port 8083 \
-        --cache-dir "$SCCACHE_CACHE" \
-        --max-size 80 >/dev/null 2>&1 &
-    sleep 0.5
+# --- Ensure ccache binary exists ---
+if [[ ! -x "$CCACHE_BIN" ]]; then
+    echo "Downloading ccache 4.12.3..."
+    mkdir -p "$(dirname "$CCACHE_BIN")"
+    curl -sL https://github.com/ccache/ccache/releases/download/v4.12.3/ccache-4.12.3-linux-x86_64.tar.xz |
+        tar -xJ --strip-components=1 -C "$(dirname "$CCACHE_BIN")"
 fi
 
-# --- Patch build.ninja to disable VerifyGlobs cmake re-run ---
-# CMake's VerifyGlobs.cmake_force phony target is always dirty, which causes
-# cmake.verify_globs to re-run, which triggers RERUN_CMAKE and regenerates
-# build.ninja — invalidating all ninja deps and causing a full rebuild.
-# Fix: remove cmake.verify_globs from the RERUN_CMAKE deps.
-patch_build_ninja() {
-    local build_ninja="$1"
-    if [[ ! -f "$build_ninja" ]]; then
-        return
-    fi
-    # Check if already patched
-    if ! python3 -c "
-with open('$build_ninja', 'r') as f:
-    for line in f:
-        if 'RERUN_CMAKE' in line and 'cmake.verify_globs' in line:
-            exit(1)
-" 2>/dev/null; then
-        # Break the hardlink before editing (safe for both seeded and non-seeded)
-        cp "$build_ninja" "$build_ninja.tmp"
-        python3 -c "
-with open('$build_ninja.tmp', 'r') as f:
-    lines = f.readlines()
-for i, line in enumerate(lines):
-    if 'RERUN_CMAKE' in line and 'cmake.verify_globs' in line:
-        lines[i] = line.replace(' /ClickHouse/build/CMakeFiles/cmake.verify_globs', '')
-        break
-with open('$build_ninja.tmp', 'w') as f:
-    f.writelines(lines)
-"
-        mv "$build_ninja.tmp" "$build_ninja"
-        # Ensure build.ninja is newer than all cmake inputs
-        touch "$build_ninja"
-        echo "Patched build.ninja (disabled VerifyGlobs cmake re-run)"
-    fi
-}
-
-# --- Seed build directory ---
-SEEDED=0
-if [[ "$NO_SEED" -eq 0 && ! -d "$BUILD_DIR" ]]; then
-    mkdir -p "$(dirname "$SEED_DIR")"
-    mkdir -p "$(dirname "$BUILD_DIR")"
-    touch "$SEED_LOCK"
-    if flock -s "$SEED_LOCK" bash -c '
-        if [ -d "'"$SEED_DIR"'" ]; then
-            cp -al "'"$SEED_DIR"'/" "'"$BUILD_DIR"'/"
-            echo "SEEDED"
-        fi
-    ' | grep -q SEEDED; then
-        SEEDED=1
-        echo "Seeded build directory from $SEED_DIR"
-        patch_build_ninja "$BUILD_DIR/build.ninja"
-    else
-        echo "No seed found — building from scratch"
-        mkdir -p "$BUILD_DIR"
-    fi
-fi
-
-mkdir -p "$BUILD_DIR"
-
-# --- Always patch build.ninja before building ---
-# This handles the case where build dir already exists from a previous build
-# that ran cmake (which regenerates the VerifyGlobs dep).
-patch_build_ninja "$BUILD_DIR/build.ninja"
-
-# --- Allocate sccache port ---
-SCCACHE_PORT=$("$REPO_ROOT/allocate-port.sh" "$WORKTREE_NAME")
+mkdir -p "$BUILD_DIR" "$CCACHE_DIR"
 
 # --- Stop any existing container with same name ---
 docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 
-# --- Build the command to run inside Docker ---
+# --- Build the Docker command ---
 DOCKER_ARGS=(
     docker run --rm
     --name "$CONTAINER_NAME"
     --user "$(id -u):$(id -g)"
     --network=host
     --volume "$WORKTREE_PATH:/ClickHouse"
-    --volume "$REPO_ROOT/.git:$REPO_ROOT/.git"
+    --volume "$CCACHE_BIN:/usr/local/bin/ccache:ro"
+    --volume "$CCACHE_DIR:/ccache"
     --workdir /ClickHouse/build
-    -e SCCACHE_ENDPOINT=http://localhost:8083
-    -e SCCACHE_BUCKET=cache
-    -e SCCACHE_S3_USE_SSL=false
-    -e SCCACHE_SERVER_PORT="$SCCACHE_PORT"
-    -e AWS_ACCESS_KEY_ID=local
-    -e AWS_SECRET_ACCESS_KEY=local
+    -e CCACHE_DIR=/ccache
+    -e CCACHE_MAXSIZE=50G
+    -e CCACHE_DEPEND=1
+    -e CCACHE_SLOPPINESS=file_macro,time_macros,include_file_mtime
+    -e CCACHE_NOHASHDIR=1
+    -e CCACHE_BASEDIR=/ClickHouse
 )
 
 if [[ "$SHELL_MODE" -eq 1 ]]; then
@@ -273,25 +201,19 @@ if [[ "$SHELL_MODE" -eq 1 ]]; then
 fi
 
 # --- Build the inner script ---
-INNER_SCRIPT=""
-
-# Start sccache
-INNER_SCRIPT+='echo "--- Starting sccache ---"
-sccache --start-server 2>&1 || true
+INNER_SCRIPT='ccache -z >/dev/null 2>&1
 '
 
 # cmake decision:
 #   - Skip if --no-cmake
 #   - Force if --cmake
 #   - Otherwise: run cmake only if build.ninja doesn't exist (first build)
-#   - After cmake, always patch build.ninja to disable VerifyGlobs
 NEED_CMAKE=1
 if [[ "$SKIP_CMAKE" -eq 1 ]]; then
     NEED_CMAKE=0
 elif [[ "$FORCE_CMAKE" -eq 1 ]]; then
     NEED_CMAKE=1
 elif [[ -f "$BUILD_DIR/build.ninja" ]]; then
-    # build.ninja exists — skip cmake to avoid VerifyGlobs cascade
     NEED_CMAKE=0
     echo "Skipping cmake (build.ninja exists; use --cmake to force)"
 fi
@@ -303,77 +225,23 @@ if [[ "$NEED_CMAKE" -eq 1 ]]; then
     done
     CMAKE_CMD+=" /ClickHouse -B /ClickHouse/build"
 
-    INNER_SCRIPT+='echo "--- Running cmake ---"
+    INNER_SCRIPT+='echo "--- cmake ---"
 '"$CMAKE_CMD"'
 CMAKE_RC=$?
 if [ $CMAKE_RC -ne 0 ]; then
     echo "cmake failed with exit code $CMAKE_RC"
     exit $CMAKE_RC
 fi
-echo "--- Patching build.ninja (post-cmake) ---"
-python3 -c "
-import sys
-path = \"/ClickHouse/build/build.ninja\"
-with open(path, \"r\") as f:
-    lines = f.readlines()
-patched = False
-for i, line in enumerate(lines):
-    if \"RERUN_CMAKE\" in line and \"cmake.verify_globs\" in line:
-        lines[i] = line.replace(\" /ClickHouse/build/CMakeFiles/cmake.verify_globs\", \"\")
-        patched = True
-        break
-if patched:
-    with open(path, \"w\") as f:
-        f.writelines(lines)
-    print(\"Patched build.ninja (disabled VerifyGlobs cmake re-run)\")
-else:
-    print(\"build.ninja already patched or no VerifyGlobs dep found\")
-"
 '
 fi
-
-# NOTE: Do NOT touch .o/.a files or run ninja -t restat on seeded builds.
-# The hardlinked files from cp -al preserve their original mtimes, which
-# match what .ninja_deps recorded. Touching them would make mtimes
-# inconsistent and cause ninja to rebuild everything.
-
-# Always patch+touch build.ninja inside container before ninja.
-# This prevents ninja from detecting stale cmake deps and auto-triggering
-# cmake re-run (which would regenerate build.ninja and invalidate all deps).
-# Must happen inside container because ninja sees /ClickHouse paths.
-INNER_SCRIPT+='
-if [ -f /ClickHouse/build/build.ninja ]; then
-    python3 -c "
-path = \"/ClickHouse/build/build.ninja\"
-with open(path, \"r\") as f:
-    lines = f.readlines()
-patched = False
-for i, line in enumerate(lines):
-    if \"RERUN_CMAKE\" in line and \"cmake.verify_globs\" in line:
-        lines[i] = line.replace(\" /ClickHouse/build/CMakeFiles/cmake.verify_globs\", \"\")
-        patched = True
-        break
-if patched:
-    with open(path + \".tmp\", \"w\") as f:
-        f.writelines(lines)
-    import os
-    os.rename(path + \".tmp\", path)
-    print(\"Patched build.ninja (disabled VerifyGlobs)\")
-"
-    # Touch build.ninja to ensure it is newer than all cmake input files.
-    # Without this, ninja compares build.ninja mtime against CMakeLists.txt
-    # files and triggers cmake re-run if any source file is newer.
-    touch /ClickHouse/build/build.ninja
-fi
-'
 
 # ninja build (unless cmake-only)
 if [[ "$CMAKE_ONLY" -eq 0 ]]; then
-    INNER_SCRIPT+='echo "--- Building ---"
+    INNER_SCRIPT+='echo "--- ninja '"$TARGET"' ---"
 time ninja '"$TARGET"'
 BUILD_RC=$?
-echo "--- sccache stats ---"
-sccache --show-stats 2>&1 || true
+echo "--- ccache stats ---"
+ccache -s
 if [ $BUILD_RC -ne 0 ]; then
     echo "Build failed with exit code $BUILD_RC"
     exit $BUILD_RC
@@ -391,20 +259,6 @@ BUILD_EXIT=$?
 if [[ $BUILD_EXIT -ne 0 ]]; then
     echo "Build failed (exit code $BUILD_EXIT)"
     exit $BUILD_EXIT
-fi
-
-# --- Update seed after successful build ---
-if [[ "$NO_SEED" -eq 0 && "$CMAKE_ONLY" -eq 0 ]]; then
-    echo "Updating build seed..."
-    mkdir -p "$(dirname "$SEED_DIR")"
-    touch "$SEED_LOCK"
-    flock "$SEED_LOCK" bash -c '
-        rm -rf "'"$SEED_DIR"'.old"
-        mv "'"$SEED_DIR"'" "'"$SEED_DIR"'.old" 2>/dev/null || true
-        cp -al "'"$BUILD_DIR"'/" "'"$SEED_DIR"'"
-        rm -rf "'"$SEED_DIR"'.old" &
-    '
-    echo "Build seed updated: $SEED_DIR"
 fi
 
 echo ""
