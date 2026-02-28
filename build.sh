@@ -337,6 +337,36 @@ fi
 # match what .ninja_deps recorded. Touching them would make mtimes
 # inconsistent and cause ninja to rebuild everything.
 
+# Always patch+touch build.ninja inside container before ninja.
+# This prevents ninja from detecting stale cmake deps and auto-triggering
+# cmake re-run (which would regenerate build.ninja and invalidate all deps).
+# Must happen inside container because ninja sees /ClickHouse paths.
+INNER_SCRIPT+='
+if [ -f /ClickHouse/build/build.ninja ]; then
+    python3 -c "
+path = \"/ClickHouse/build/build.ninja\"
+with open(path, \"r\") as f:
+    lines = f.readlines()
+patched = False
+for i, line in enumerate(lines):
+    if \"RERUN_CMAKE\" in line and \"cmake.verify_globs\" in line:
+        lines[i] = line.replace(\" /ClickHouse/build/CMakeFiles/cmake.verify_globs\", \"\")
+        patched = True
+        break
+if patched:
+    with open(path + \".tmp\", \"w\") as f:
+        f.writelines(lines)
+    import os
+    os.rename(path + \".tmp\", path)
+    print(\"Patched build.ninja (disabled VerifyGlobs)\")
+"
+    # Touch build.ninja to ensure it is newer than all cmake input files.
+    # Without this, ninja compares build.ninja mtime against CMakeLists.txt
+    # files and triggers cmake re-run if any source file is newer.
+    touch /ClickHouse/build/build.ninja
+fi
+'
+
 # ninja build (unless cmake-only)
 if [[ "$CMAKE_ONLY" -eq 0 ]]; then
     INNER_SCRIPT+='echo "--- Building ---"
