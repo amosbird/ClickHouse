@@ -118,7 +118,7 @@ git -C "$WORKTREE_PATH" submodule foreach \
 
 ### 4. Apply CI patches (if not already present)
 
-The worktree needs two upstream-friendly patches for the sccache proxy to work.
+The worktree needs five upstream-friendly patches for the dev workflow to work.
 Check if they're already applied before patching.
 
 **Patch 1: `ci/jobs/build_clickhouse.py`** — Use `setdefault` for sccache env vars
@@ -182,6 +182,44 @@ Add `PRAKTIKA_CONTAINER_NAME` support for the Docker container name:
 container_name = os.environ.get("PRAKTIKA_CONTAINER_NAME", "praktika")
 ```
 Required for parallel builds since two Docker containers can't share the same name.
+
+**Patch 5: `ci/jobs/build_clickhouse.py`** — Smart checkout skip for local runs
+
+The `do_checkout` function is modified to skip the expensive network-based submodule
+update when submodules are already populated (e.g., via hardlinked worktree setup).
+On local runs, it checks `git submodule status` for uninitialized entries ("-" prefix);
+if all submodules are initialized, it skips `contrib/update-submodules.sh` entirely.
+```python
+def do_checkout():
+    # On local runs, skip the expensive network-based submodule update
+    # if submodules are already populated (e.g. via hardlinked worktree
+    # setup).  Check by looking for uninitialized ("-" prefix) entries
+    # in `git submodule status`.
+    if info.is_local_run:
+        out = Shell.get_output("git submodule status")
+        if out:
+            uninitialized = [
+                line
+                for line in out.splitlines()
+                if line.strip().startswith("-")
+            ]
+            if not uninitialized:
+                print(
+                    "NOTE: All submodules already initialized — skipping network update (local run)"
+                )
+                Shell.check(f"mkdir -p {build_dir}")
+                return True
+
+    res = Shell.check(
+        f"mkdir -p {build_dir} && git submodule sync && git submodule init"
+    )
+    res = res and Shell.check(
+        "contrib/update-submodules.sh --max-procs 10",
+        retries=3,
+    )
+    return res
+```
+This saves ~30 seconds on each build by avoiding unnecessary network fetches.
 
 ### 5. Build with Praktika
 
@@ -287,7 +325,7 @@ The proxy (`sccache-proxy.py`) is a Python HTTP server that acts as a local S3-c
 - The sccache proxy runs on port **8083** (NOT 9000 — that conflicts with ClickHouse native protocol)
 - Docker containers use `--network=host`, so they can reach `localhost:8083` on the host
 - sccache inside Docker images is v0.10.0, installed in the fasttest base image
-- The two CI patches are designed to be upstream-friendly (general-purpose mechanisms, no hardcoded overrides)
+- The five CI patches are designed to be upstream-friendly (general-purpose mechanisms, no hardcoded overrides)
 - sccache uses OpenDAL library, makes only `GetObject` and `PutObject` S3 API calls
 - First build in a new worktree needs cmake; subsequent builds can skip it with `--param cmake`
 - Build target is `ninja clickhouse-bundle` (includes clickhouse binary and all tools)
@@ -319,3 +357,22 @@ export SCCACHE_SERVER_PORT=$(./allocate-port.sh my-feature)
 # Release a port after removing a worktree
 ./allocate-port.sh --release my-feature
 ```
+
+## Submodule + Worktree Sharing: Design Notes
+
+Git's official documentation (BUGS section) still states worktree+submodule support
+is "incomplete" as of git 2.53. No `--recurse-submodules` flag exists for `git worktree add`.
+
+**Why hardlinks (`cp -al`) over alternatives:**
+- `git submodule update --reference`: Still requires network fetches; `--reference` only provides
+  alternates for object lookups. Our `cp -al` is purely local, zero network.
+- Symlinks: More fragile than hardlinks, git doesn't support symlinked `.git` directories well.
+- Re-downloading: 129 submodules, ~7.5GB — too slow for worktree creation.
+- Custom tooling (repo/gclient): Overkill for our use case.
+
+**Known risks of hardlinks (mitigated in our setup):**
+- `git gc` / repack could corrupt shared objects if run concurrently — we never run `git gc`
+  in worktrees (builds are in Docker, and all worktrees track the same upstream master).
+- Submodule version conflicts if worktrees check out different submodule commits simultaneously —
+  mitigated because all worktrees track the same upstream master branch.
+- Cannot move worktrees with `git worktree move` — not needed in our workflow.
