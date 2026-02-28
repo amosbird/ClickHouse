@@ -156,6 +156,33 @@ if prefixes:
 ```
 Then include `{passthrough_envs}` in the `docker run` command string.
 
+**Patch 3: `ci/praktika/runner.py`** — Extra Docker volume mounts
+
+Add `PRAKTIKA_DOCKER_EXTRA_MOUNTS` support in the `extra_mounts` construction block:
+```python
+# Mount additional host paths into Docker via PRAKTIKA_DOCKER_EXTRA_MOUNTS.
+# Comma-separated list of Docker --volume specs, e.g.
+# "/host/path:/container/path:ro,/another:/another"
+docker_extra_mounts = os.environ.get("PRAKTIKA_DOCKER_EXTRA_MOUNTS", "")
+if docker_extra_mounts:
+    for mount in docker_extra_mounts.split(","):
+        mount = mount.strip()
+        if mount:
+            extra_mounts += f" --volume {mount}"
+```
+
+This is **required for worktrees** — the worktree's `.git` file references the parent repo's
+`.git/worktrees/<name>/` directory, which is outside the Docker volume mount. Without this,
+`git submodule` commands fail inside Docker with `fatal: not a git repository`.
+
+**Patch 4: `ci/praktika/runner.py`** — Custom container name
+
+Add `PRAKTIKA_CONTAINER_NAME` support for the Docker container name:
+```python
+container_name = os.environ.get("PRAKTIKA_CONTAINER_NAME", "praktika")
+```
+Required for parallel builds since two Docker containers can't share the same name.
+
 ### 5. Build with Praktika
 
 **Set environment variables:**
@@ -165,6 +192,13 @@ export PRAKTIKA_DOCKER_PASSTHROUGH="SCCACHE_,AWS_"
 export SCCACHE_ENDPOINT="http://localhost:8083"
 export AWS_ACCESS_KEY_ID="local"
 export AWS_SECRET_ACCESS_KEY="local"
+
+# Required for worktrees — mount the parent .git directory into Docker
+REPO_ROOT="/tmp/gentoo/home/amos/git/ClickHouse"
+export PRAKTIKA_DOCKER_EXTRA_MOUNTS="$REPO_ROOT/.git:$REPO_ROOT/.git"
+
+# For parallel builds, each container needs a unique name
+export PRAKTIKA_CONTAINER_NAME="praktika-$(basename $WORKTREE_PATH)"
 ```
 
 **Run the build:**
@@ -193,8 +227,8 @@ The `--param cmake` flag causes the build script to skip the cmake configure ste
 ### 6. Monitor build progress
 
 ```bash
-# Watch Docker container logs
-docker logs -f praktika
+# Watch Docker container logs (use container name from PRAKTIKA_CONTAINER_NAME)
+docker logs -f praktika-$(basename $WORKTREE_PATH)
 
 # Check sccache proxy stats
 curl -s http://localhost:8083/ | python3 -m json.tool
@@ -251,3 +285,16 @@ The proxy (`sccache-proxy.py`) is a Python HTTP server that acts as a local S3-c
 - sccache uses OpenDAL library, makes only `GetObject` and `PutObject` S3 API calls
 - First build in a new worktree needs cmake; subsequent builds can skip it with `--param cmake`
 - Build target is `ninja clickhouse-bundle` (includes clickhouse binary and all tools)
+
+## Parallel Builds
+
+Multiple worktrees can be built in parallel, but **sequentially is safer**:
+
+- Each parallel build needs a unique container name (`PRAKTIKA_CONTAINER_NAME`)
+- With `--network=host`, sccache servers conflict on port 4226 — the second build's sccache
+  server fails to start, but its client reuses the first build's running server (this works fine)
+- Heavy resource contention (2x 96 compile jobs) can cause sporadic build failures in sub-builds
+  (e.g., clang-builtins archive step fails with "No such file or directory")
+- **Recommendation**: Build worktrees sequentially to avoid resource contention. The local
+  sccache cache means the second build is nearly 100% cache hits and completes much faster.
+- Cache performance observed: first build ~50% upstream hits; second build ~100% local hits
