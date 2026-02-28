@@ -34,6 +34,7 @@ for arg in "$@"; do
 done
 
 is_running() {
+    # First check PID file
     if [ -f "$PID_FILE" ]; then
         pid=$(cat "$PID_FILE")
         if kill -0 "$pid" 2>/dev/null; then
@@ -41,17 +42,34 @@ is_running() {
         fi
         rm -f "$PID_FILE"
     fi
+    # Fallback: probe the port directly (handles manually started instances)
+    if curl -s --max-time 2 "http://localhost:$PORT/" >/dev/null 2>&1; then
+        # Proxy is running but we don't have a PID file — try to find the PID
+        pid=$(pgrep -f "python3 .*sccache-proxy\.py" 2>/dev/null | tail -1 || true)
+        if [ -n "$pid" ]; then
+            echo "$pid" >"$PID_FILE"
+        fi
+        return 0
+    fi
     return 1
 }
 
 case "$ACTION" in
 stop)
     if is_running; then
-        pid=$(cat "$PID_FILE")
-        echo "Stopping sccache proxy (PID $pid)..."
-        kill "$pid"
-        rm -f "$PID_FILE"
-        echo "Stopped."
+        if [ -f "$PID_FILE" ]; then
+            pid=$(cat "$PID_FILE")
+        else
+            pid=$(pgrep -f "python3 .*sccache-proxy\.py" 2>/dev/null | tail -1 || true)
+        fi
+        if [ -n "$pid" ]; then
+            echo "Stopping sccache proxy (PID $pid)..."
+            kill $pid 2>/dev/null || true
+            rm -f "$PID_FILE"
+            echo "Stopped."
+        else
+            echo "Proxy seems to be running but could not find PID."
+        fi
     else
         echo "Proxy is not running."
     fi
@@ -59,7 +77,11 @@ stop)
 
 status)
     if is_running; then
-        pid=$(cat "$PID_FILE")
+        if [ -f "$PID_FILE" ]; then
+            pid=$(cat "$PID_FILE")
+        else
+            pid="unknown"
+        fi
         echo "Proxy is running (PID $pid)"
         echo ""
         curl -s "http://localhost:$PORT/" 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "Could not fetch stats"
