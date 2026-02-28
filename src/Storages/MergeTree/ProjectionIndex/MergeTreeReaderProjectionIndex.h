@@ -29,6 +29,10 @@ private:
     /// Build PostingListCursorMap from remaining_tokens.
     PostingListCursorMap buildCursorMap();
 
+    /// Create an independent LargePostingListReaderStream for a cursor.
+    /// Each cursor gets its own stream to avoid seek contention in leapfrog intersection.
+    LargePostingListReaderStreamPtr createIndependentPostingStream() const;
+
     /// Ensure cursor map is built (called once, lazy).
     void ensureCursorMap();
 

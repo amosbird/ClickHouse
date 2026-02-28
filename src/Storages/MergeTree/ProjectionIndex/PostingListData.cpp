@@ -12,7 +12,6 @@
 
 #include <fmt/ranges.h>
 #include <turbopfor.h>
-#pragma clang optimize off
 namespace DB
 {
 

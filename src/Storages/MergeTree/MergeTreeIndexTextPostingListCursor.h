@@ -18,6 +18,7 @@ class WriteBuffer;
 class ReadBuffer;
 class IColumn;
 struct LargePostingListReaderStream;
+using LargePostingListReaderStreamPtr = std::shared_ptr<LargePostingListReaderStream>;
 
 /// A cursor for lazily iterating over a compressed posting list stored in
 /// ProjectionIndex V2 format (TurboPFor delta-encoded with per-large-block
@@ -40,6 +41,10 @@ class PostingListCursor
 public:
     /// Construct a cursor for large posting lists backed by a LargePostingListReaderStream.
     PostingListCursor(LargePostingListReaderStream * stream_, const TokenPostingsInfo & info_, size_t large_block);
+
+    /// Construct a cursor that owns an independent LargePostingListReaderStream.
+    /// Used in lazy apply mode to give each cursor its own stream, avoiding seek contention.
+    PostingListCursor(LargePostingListReaderStreamPtr owned_stream_, const TokenPostingsInfo & info_, size_t large_block);
 
     /// Construct a cursor for embedded posting lists (no stream needed).
     PostingListCursor(const TokenPostingsInfo & info_, size_t large_block);
@@ -101,6 +106,7 @@ private:
     }
 
     LargePostingListReaderStream * stream = nullptr;
+    LargePostingListReaderStreamPtr owned_stream;
 
     const TokenPostingsInfo & info;
 

@@ -4,7 +4,6 @@
 #include <Common/ElapsedTimeProfileEventIncrement.h>
 #include <IO/ReadHelpers.h>
 
-#pragma clang optimize off
 #include <turbopfor.h>
 
 namespace DB
@@ -89,6 +88,15 @@ inline void readPrefixVarUInt32(UInt32 & x, ReadBuffer & istr)
 
 PostingListCursor::PostingListCursor(LargePostingListReaderStream * stream_, const TokenPostingsInfo & info_, size_t large_block)
     : stream(stream_)
+    , info(info_)
+{
+    large_blocks.push_back(large_block);
+    prepare(large_block);
+}
+
+PostingListCursor::PostingListCursor(LargePostingListReaderStreamPtr owned_stream_, const TokenPostingsInfo & info_, size_t large_block)
+    : stream(owned_stream_.get())
+    , owned_stream(std::move(owned_stream_))
     , info(info_)
 {
     large_blocks.push_back(large_block);

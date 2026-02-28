@@ -2,6 +2,7 @@
 
 #include <Storages/MergeTree/ProjectionIndex/MergeTreeIndexProjection.h>
 #include <Storages/MergeTree/ProjectionIndex/PostingListState.h>
+#include <Storages/MergeTree/ProjectionIndex/ProjectionIndexSerializationContext.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
 #include <Columns/ColumnsNumber.h>
 #include <Common/ElapsedTimeProfileEventIncrement.h>
@@ -42,12 +43,19 @@ PostingListPtr MergeTreeReaderProjectionIndex::readPostingsBlockForToken(
         *granule_projection.large_posting_stream, token_info, block_idx, granule_projection.posting_list_format_version);
 }
 
+LargePostingListReaderStreamPtr MergeTreeReaderProjectionIndex::createIndependentPostingStream() const
+{
+    auto stream_name = IMergeTreeDataPart::getStreamNameForColumn(
+        "posting", {}, PROJECTION_INDEX_LARGE_POSTING_SUFFIX, data_part_info_for_read->getChecksums(), storage_settings);
+    chassert(stream_name);
+    return createLargePostingStream(*stream_name, {}, CLOCK_MONOTONIC_COARSE);
+}
+
 PostingListCursorMap MergeTreeReaderProjectionIndex::buildCursorMap()
 {
     chassert(granule);
     auto & granule_text = dynamic_cast<MergeTreeIndexGranuleText &>(*granule);
     const auto & remaining_tokens = granule_text.getRemainingTokens();
-    auto & granule_projection = assert_cast<MergeTreeIndexGranuleProjection &>(*granule);
 
     PostingListCursorMap result;
 
@@ -64,11 +72,12 @@ PostingListCursorMap MergeTreeReaderProjectionIndex::buildCursorMap()
         }
         else if (!token_info.offsets.empty())
         {
-            /// For large postings, create cursor with the large posting stream.
-            /// Each LargePostingBlockMeta in offsets corresponds to one large block.
-            chassert(granule_projection.large_posting_stream);
+            /// For large postings, create cursor with an independent stream.
+            /// Each cursor owns its own stream to avoid seek contention
+            /// when multiple cursors share a ReadBuffer in leapfrog intersection.
+            auto independent_stream = createIndependentPostingStream();
             auto cursor = std::make_shared<PostingListCursor>(
-                granule_projection.large_posting_stream.get(), token_info, 0);
+                std::move(independent_stream), token_info, 0);
             for (size_t s = 1; s < token_info.offsets.size(); ++s)
                 cursor->addLargeBlock(s);
             result.emplace(token, std::move(cursor));
