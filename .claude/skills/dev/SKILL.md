@@ -262,8 +262,11 @@ fi
 - **Ninja mtime behavior**: ninja compares recorded mtime in `.ninja_log` against current source
   file mtime. Since `git worktree add` checks out sources with fresh timestamps, all `.o` files
   will be marked dirty and recompiled. This is expected — sccache provides ~100% hit rate for
-  unchanged sources. The seed's value comes from cmake state and Rust/cargo artifacts (which use
-  content-based fingerprinting, not mtime).
+  unchanged sources. The seed's value comes from cmake state and Rust/cargo artifacts.
+- **Rust PATH deps**: Cargo uses mtime-based fingerprinting for PATH dependencies (e.g.,
+  `contrib/delta-kernel-rs/`, `contrib/wasmtime/`). The `CARGO_UNSTABLE_CHECKSUM_FRESHNESS=true`
+  env var (set in step 6) switches cargo to content-based checksums, eliminating ~16s of
+  unnecessary recompilation when source file timestamps differ but content is identical.
 
 ### 6. Build with Praktika
 
@@ -273,10 +276,17 @@ REPO_ROOT="/tmp/gentoo/home/amos/git/ClickHouse"
 WORKTREE_NAME="$(basename "$WORKTREE_PATH")"
 
 export PYTHONPATH=".:./ci"
-export PRAKTIKA_DOCKER_PASSTHROUGH="SCCACHE_,AWS_"
+export PRAKTIKA_DOCKER_PASSTHROUGH="SCCACHE_,AWS_,CARGO_UNSTABLE_"
 export SCCACHE_ENDPOINT="http://localhost:8083"
 export AWS_ACCESS_KEY_ID="local"
 export AWS_SECRET_ACCESS_KEY="local"
+
+# Cargo: use content-based checksums instead of mtime for rebuild detection.
+# This prevents ~16s of unnecessary recompilation of PATH dependencies
+# (delta-kernel-rs, wasmtime) when source files have fresh timestamps from git checkout.
+# Requires nightly cargo (ClickHouse uses nightly-2025-07-07).
+# See: https://github.com/rust-lang/cargo/issues/14136
+export CARGO_UNSTABLE_CHECKSUM_FRESHNESS=true
 
 # Required for worktrees — mount the parent .git directory into Docker
 export PRAKTIKA_DOCKER_EXTRA_MOUNTS="$REPO_ROOT/.git:$REPO_ROOT/.git"
