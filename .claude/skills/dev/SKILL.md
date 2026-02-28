@@ -18,7 +18,8 @@ ClickHouse/                    ← meta branch (amos), repo root
 ├── my-feature/                ← feature worktree (sibling of src/)
 ├── fix-bug-123/               ← another worktree
 ├── sccache-proxy.py           ← local S3 cache proxy
-├── cache/sccache/             ← local cache (gitignored)
+├── cache/sccache/             ← sccache cache (gitignored)
+├── cache/builds/<type>/       ← build directory seeds (gitignored)
 ├── .claude/skills/dev/SKILL.md ← this file
 └── .git/
     └── worktrees/
@@ -221,7 +222,50 @@ def do_checkout():
 ```
 This saves ~30 seconds on each build by avoiding unnecessary network fetches.
 
-### 5. Build with Praktika
+### 5. Seed build directory (if empty)
+
+Before running Praktika, check if the worktree already has a build directory.
+If not, copy one from the seed cache. This eliminates cmake reconfiguration (~44s → ~5s)
+and Rust crate recompilation (754 crates → 0) on new worktrees. C++ `.o` files are also
+copied but ninja will rebuild them (mtime mismatch — see notes below); sccache handles those.
+
+The seed is safe to copy because Praktika mounts every worktree as `--volume .:/ClickHouse`,
+so `CMakeCache.txt` always records `CMAKE_SOURCE_DIR=/ClickHouse` and
+`CMAKE_BINARY_DIR=/ClickHouse/ci/tmp/build` — identical paths regardless of host worktree location.
+
+```bash
+BUILD_TYPE="amd_binary"  # or whatever --build-type was requested
+SEED_DIR="$REPO_ROOT/cache/builds/$BUILD_TYPE"
+SEED_LOCK="$REPO_ROOT/cache/builds/seed.lock"
+BUILD_DIR="$WORKTREE_PATH/ci/tmp/build"
+
+if [ ! -d "$BUILD_DIR" ]; then
+    mkdir -p "$WORKTREE_PATH/ci/tmp"
+    mkdir -p "$(dirname "$SEED_DIR")"
+    touch "$SEED_LOCK"
+    flock -s "$SEED_LOCK" bash -c '
+      if [ -d "'"$SEED_DIR"'" ]; then
+        cp -al "'"$SEED_DIR"'/" "'"$BUILD_DIR"'/"
+        echo "Seeded build directory from $SEED_DIR"
+      else
+        echo "No seed found — building from scratch"
+      fi
+    '
+fi
+```
+
+**Notes:**
+- `flock -s` (shared lock) allows multiple worktrees to read the seed concurrently
+- `cp -al` uses hardlinks — fast copy, no extra disk until files diverge
+- If no seed exists yet (first ever build), the build proceeds from scratch and creates the seed afterward (step 9)
+- The seed directory is per build type: `cache/builds/amd_binary/`, `cache/builds/amd_debug/`, etc.
+- **Ninja mtime behavior**: ninja compares recorded mtime in `.ninja_log` against current source
+  file mtime. Since `git worktree add` checks out sources with fresh timestamps, all `.o` files
+  will be marked dirty and recompiled. This is expected — sccache provides ~100% hit rate for
+  unchanged sources. The seed's value comes from cmake state and Rust/cargo artifacts (which use
+  content-based fingerprinting, not mtime).
+
+### 6. Build with Praktika
 
 **Set environment variables:**
 ```bash
@@ -268,7 +312,7 @@ python3 -m praktika run build --param cmake
 
 The `--param cmake` flag causes the build script to skip the cmake configure step.
 
-### 6. Monitor build progress
+### 7. Monitor build progress
 
 ```bash
 # Watch Docker container logs (use container name from PRAKTIKA_CONTAINER_NAME)
@@ -285,7 +329,7 @@ ls -la "$WORKTREE_PATH/ci/tmp/build/programs/clickhouse"
 Since Praktika mounts `./` into Docker as `--volume .:/ClickHouse`, the build artifacts
 appear at `$WORKTREE_PATH/ci/tmp/build/programs/clickhouse` on the host.
 
-### 7. Report results
+### 8. Report results
 
 Report to user:
 - Worktree: `$WORKTREE_PATH`
@@ -293,6 +337,36 @@ Report to user:
 - Build status: success/failed
 - Binary: `$WORKTREE_PATH/ci/tmp/build/programs/clickhouse`
 - sccache stats (hit rate, errors)
+
+### 9. Update build seed (after successful build)
+
+After a successful build, atomically update the seed directory so future worktrees
+benefit from the cached cmake state and compiled Rust crates.
+
+```bash
+BUILD_TYPE="amd_binary"  # same as step 5
+SEED_DIR="$REPO_ROOT/cache/builds/$BUILD_TYPE"
+SEED_LOCK="$REPO_ROOT/cache/builds/seed.lock"
+BUILD_DIR="$WORKTREE_PATH/ci/tmp/build"
+
+mkdir -p "$(dirname "$SEED_DIR")"
+touch "$SEED_LOCK"
+flock "$SEED_LOCK" bash -c '
+  rm -rf "'"$SEED_DIR"'.old"
+  mv "'"$SEED_DIR"'" "'"$SEED_DIR"'.old" 2>/dev/null
+  cp -al "'"$BUILD_DIR"'/" "'"$SEED_DIR"'"
+  rm -rf "'"$SEED_DIR"'.old" &
+'
+echo "Build seed updated: $SEED_DIR"
+```
+
+**Notes:**
+- `flock` (exclusive lock) blocks concurrent seed reads/writes during the update
+- Two-step `mv`: rename old seed → `.old`, then hardlink-copy new build → seed. This is safe
+  because `rename(2)` on Linux returns `ENOTEMPTY` for non-empty directories, so a single
+  `mv -T` cannot atomically replace — we use flock for mutual exclusion instead.
+- `rm -rf .old &` runs in background — cleanup doesn't block the workflow
+- Only update after a **successful** build — never seed a broken build directory
 
 ## sccache Proxy Details
 
@@ -327,7 +401,7 @@ The proxy (`sccache-proxy.py`) is a Python HTTP server that acts as a local S3-c
 - sccache inside Docker images is v0.10.0, installed in the fasttest base image
 - The five CI patches are designed to be upstream-friendly (general-purpose mechanisms, no hardcoded overrides)
 - sccache uses OpenDAL library, makes only `GetObject` and `PutObject` S3 API calls
-- First build in a new worktree needs cmake; subsequent builds can skip it with `--param cmake`
+- First build in a new worktree uses seeded build directory (step 5) for cmake and Rust cache; subsequent builds can skip cmake with `--param cmake`
 - Build target is `ninja clickhouse-bundle` (includes clickhouse binary and all tools)
 
 ## Parallel Builds
