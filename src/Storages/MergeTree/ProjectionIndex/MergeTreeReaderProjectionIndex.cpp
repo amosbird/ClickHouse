@@ -45,10 +45,40 @@ PostingListPtr MergeTreeReaderProjectionIndex::readPostingsBlockForToken(
 
 LargePostingListReaderStreamPtr MergeTreeReaderProjectionIndex::createIndependentPostingStream() const
 {
+    chassert(granule);
+    auto & granule_projection = assert_cast<MergeTreeIndexGranuleProjection &>(*granule);
+    chassert(granule_projection.projection_part);
+
+    /// Use the projection part's checksums and storage, not the main part's.
+    /// `data_part_info_for_read` refers to the main part, but the `.lpst` file
+    /// is written into the projection part's directory.
+    const auto & proj_part = granule_projection.projection_part;
     auto stream_name = IMergeTreeDataPart::getStreamNameForColumn(
-        "posting", {}, PROJECTION_INDEX_LARGE_POSTING_SUFFIX, data_part_info_for_read->getChecksums(), storage_settings);
+        "posting", {}, PROJECTION_INDEX_LARGE_POSTING_SUFFIX, proj_part->checksums, storage_settings);
     chassert(stream_name);
-    return createLargePostingStream(*stream_name, {}, CLOCK_MONOTONIC_COARSE);
+
+    auto proj_storage = proj_part->getDataPartStoragePtr();
+    String file_name = *stream_name + PROJECTION_INDEX_LARGE_POSTING_SUFFIX;
+    size_t file_size = proj_storage->getFileSize(file_name);
+
+    static constexpr size_t marks_count = 1;
+    auto large_posting_stream_settings = settings;
+    large_posting_stream_settings.is_compressed = false;
+    return std::make_shared<LargePostingListReaderStream>(
+        data_part_info_for_read->getMergedPartOffsets(),
+        data_part_info_for_read->getPartIndex(),
+        data_part_info_for_read->getPartStartingOffset(),
+        proj_storage,
+        *stream_name,
+        PROJECTION_INDEX_LARGE_POSTING_SUFFIX,
+        marks_count,
+        MarkRanges{{0, marks_count}},
+        large_posting_stream_settings,
+        /*uncompressed_cache=*/nullptr,
+        file_size,
+        /*marks_loader=*/nullptr,
+        ReadBufferFromFileBase::ProfileCallback{},
+        CLOCK_MONOTONIC_COARSE);
 }
 
 PostingListCursorMap MergeTreeReaderProjectionIndex::buildCursorMap()

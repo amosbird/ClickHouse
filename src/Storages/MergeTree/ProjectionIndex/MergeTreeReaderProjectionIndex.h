@@ -31,6 +31,7 @@ private:
 
     /// Create an independent LargePostingListReaderStream for a cursor.
     /// Each cursor gets its own stream to avoid seek contention in leapfrog intersection.
+    /// Uses the projection part's storage and checksums (not the main part's).
     LargePostingListReaderStreamPtr createIndependentPostingStream() const;
 
     /// Ensure cursor map is built (called once, lazy).

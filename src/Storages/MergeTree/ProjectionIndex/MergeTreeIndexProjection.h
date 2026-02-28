@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Storages/MergeTree/MergeTreeIndexText.h>
+#include <Storages/MergeTree/IMergeTreeDataPart.h>
 
 namespace DB
 {
@@ -22,6 +23,11 @@ struct MergeTreeIndexGranuleProjection final : public MergeTreeIndexGranuleText
 
     /// TODO(amos): Do we need per-token stream to reduce seek?
     LargePostingListReaderStreamPtr large_posting_stream;
+
+    /// The projection part that stores the `.lpst` file.
+    /// Saved during deserialization so that `MergeTreeReaderProjectionIndex`
+    /// can create independent posting streams from the correct storage.
+    MergeTreeDataPartPtr projection_part;
 };
 
 class MergeTreeIndexProjection final : public IMergeTreeIndex
