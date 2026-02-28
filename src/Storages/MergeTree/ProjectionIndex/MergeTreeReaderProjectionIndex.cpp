@@ -97,7 +97,7 @@ PostingListCursorMap MergeTreeReaderProjectionIndex::buildCursorMap()
         if (token_info.embedded_postings)
         {
             /// For embedded postings, create cursor without stream (it reads from embedded data).
-            auto cursor = std::make_shared<PostingListCursor>(token_info, 0);
+            auto cursor = std::make_shared<PostingListCursor>(token_info);
             result.emplace(token, std::move(cursor));
         }
         else if (!token_info.offsets.empty())
@@ -107,9 +107,7 @@ PostingListCursorMap MergeTreeReaderProjectionIndex::buildCursorMap()
             /// when multiple cursors share a ReadBuffer in leapfrog intersection.
             auto independent_stream = createIndependentPostingStream();
             auto cursor = std::make_shared<PostingListCursor>(
-                std::move(independent_stream), token_info, 0);
-            for (size_t s = 1; s < token_info.offsets.size(); ++s)
-                cursor->addLargeBlock(s);
+                std::move(independent_stream), token_info);
             result.emplace(token, std::move(cursor));
         }
     }

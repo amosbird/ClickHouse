@@ -39,15 +39,12 @@ using LargePostingListReaderStreamPtr = std::shared_ptr<LargePostingListReaderSt
 class PostingListCursor
 {
 public:
-    /// Construct a cursor for large posting lists backed by a LargePostingListReaderStream.
-    PostingListCursor(LargePostingListReaderStream * stream_, const TokenPostingsInfo & info_, size_t large_block);
-
     /// Construct a cursor that owns an independent LargePostingListReaderStream.
     /// Used in lazy apply mode to give each cursor its own stream, avoiding seek contention.
-    PostingListCursor(LargePostingListReaderStreamPtr owned_stream_, const TokenPostingsInfo & info_, size_t large_block);
+    PostingListCursor(LargePostingListReaderStreamPtr owned_stream_, const TokenPostingsInfo & info_);
 
     /// Construct a cursor for embedded posting lists (no stream needed).
-    PostingListCursor(const TokenPostingsInfo & info_, size_t large_block);
+    PostingListCursor(const TokenPostingsInfo & info_);
 
     /// Register an additional large block to iterate over.
     void addLargeBlock(size_t);
@@ -100,15 +97,6 @@ private:
     /// Returns false if no more packed blocks remain in the current large block.
     bool decodeNextBlock();
 
-    inline void maybeEraseUnusedLargeBlocks(int unused_large_block_index)
-    {
-        chassert(static_cast<size_t>(unused_large_block_index) < large_blocks.size());
-        if (unused_large_block_index >= 0 && large_blocks.size() > 1)
-        {
-            large_blocks.erase(large_blocks.begin(), large_blocks.begin() + unused_large_block_index + 1);
-        }
-    }
-
     LargePostingListReaderStream * stream = nullptr;
     LargePostingListReaderStreamPtr owned_stream;
 
@@ -138,8 +126,9 @@ private:
     std::vector<UInt64> packed_block_offsets;
 
     /// Large blocks this cursor covers (indexes into info.offsets / info.ranges)
-    std::vector<size_t> large_blocks;
-    size_t current_large_block_idx = std::numeric_limits<size_t>::max();
+    size_t total_large_blocks = 0;
+    size_t current_large_block_idx = 0;
+    bool has_prepared_first_large_block = false;
 
     bool is_valid = true;
     bool is_embedded = false;

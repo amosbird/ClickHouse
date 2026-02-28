@@ -87,25 +87,18 @@ inline void readPrefixVarUInt32(UInt32 & x, ReadBuffer & istr)
 
 } // anonymous namespace
 
-PostingListCursor::PostingListCursor(LargePostingListReaderStream * stream_, const TokenPostingsInfo & info_, size_t large_block)
-    : stream(stream_)
-    , info(info_)
-{
-    large_blocks.push_back(large_block);
-    prepare(large_block);
-}
-
-PostingListCursor::PostingListCursor(LargePostingListReaderStreamPtr owned_stream_, const TokenPostingsInfo & info_, size_t large_block)
+PostingListCursor::PostingListCursor(LargePostingListReaderStreamPtr owned_stream_, const TokenPostingsInfo & info_)
     : stream(owned_stream_.get())
     , owned_stream(std::move(owned_stream_))
     , info(info_)
+    , total_large_blocks(info.offsets.size())
 {
-    large_blocks.push_back(large_block);
-    prepare(large_block);
+    if (total_large_blocks > 0)
+        prepare(0);
 }
 
-PostingListCursor::PostingListCursor(const TokenPostingsInfo & info_, size_t large_block)
-    : PostingListCursor(nullptr, info_, large_block)
+PostingListCursor::PostingListCursor(const TokenPostingsInfo & info_)
+    : PostingListCursor(nullptr, info_)
 {
 }
 
@@ -114,20 +107,11 @@ UInt32 PostingListCursor::cardinality() const
     return info.cardinality;
 }
 
-void PostingListCursor::addLargeBlock(size_t s)
-{
-    auto it = std::find(large_blocks.begin(), large_blocks.end(), s);
-    if (it == large_blocks.end())
-    {
-        large_blocks.push_back(s);
-        is_valid = true;
-    }
-}
-
 void PostingListCursor::prepare(size_t large_block_idx)
 {
-    if (current_large_block_idx == large_block_idx && current_large_block_idx != std::numeric_limits<size_t>::max())
+    if (current_large_block_idx == large_block_idx && has_prepared_first_large_block)
         return;
+    has_prepared_first_large_block = true;
 
     /// Large block 0's packed block 0 needs to prepend `first_doc_id` (which is stored
     /// separately in the dictionary stream and not included in TurboPFor encoding), so
@@ -278,16 +262,10 @@ void PostingListCursor::seek(uint32_t target)
     if (!is_embedded && seekImpl(target))
         return;
 
-    int unused_large_block_index = -1;
     bool found = false;
-    for (size_t i = 0; i < large_blocks.size(); ++i)
+    for (size_t i = current_large_block_idx; i < total_large_blocks; ++i)
     {
-        auto large_block = large_blocks[i];
-        if (large_block < current_large_block_idx)
-        {
-            unused_large_block_index = static_cast<int>(i);
-            continue;
-        }
+        auto large_block = i;
         const auto & range = info.ranges[large_block];
         if (range.end >= target)
         {
@@ -300,8 +278,6 @@ void PostingListCursor::seek(uint32_t target)
         }
     }
 
-    if (unused_large_block_index > 0)
-        maybeEraseUnusedLargeBlocks(unused_large_block_index);
     is_valid = found;
 }
 
@@ -419,10 +395,10 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
         auto it = std::lower_bound(current_values.begin(), current_values.end(), row_begin);
         if (it == current_values.end())
             return;
-        size_t idx = static_cast<size_t>(it - current_values.begin());
+        size_t begin_idx = static_cast<size_t>(it - current_values.begin());
         auto it_end = std::upper_bound(current_values.begin(), current_values.end(), row_end);
-        size_t length = it_end - current_values.begin();
-        padColumnForOr(out, current_values, row_begin, idx, length);
+        size_t end_idx = it_end - current_values.begin();
+        padColumnForOr(out, current_values, row_begin, begin_idx, end_idx);
         return;
     }
 
@@ -447,37 +423,33 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
         auto it = std::lower_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_begin));
         if (it == current_values.end())
             continue;
-        size_t idx = static_cast<size_t>(it - current_values.begin());
+        size_t begin_idx = static_cast<size_t>(it - current_values.begin());
         auto it_end = std::upper_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_end));
-        size_t length = it_end - current_values.begin();
+        size_t end_idx = it_end - current_values.begin();
 
-        padColumnForOr(out, current_values, row_begin, idx, length);
+        padColumnForOr(out, current_values, row_begin, begin_idx, end_idx);
 
-        if (length < current_values.size())
+        if (end_idx < current_values.size())
             return;
     }
 }
 
 void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_rows)
 {
-    int unused_large_block_index = -1;
-    for (size_t i = 0; i < large_blocks.size(); ++i)
+    for (size_t i = current_large_block_idx; i < total_large_blocks; ++i)
     {
-        auto large_block = large_blocks[i];
+        auto large_block = i;
         size_t begin = info.ranges[large_block].begin;
         size_t end = info.ranges[large_block].end;
 
         if (row_offset > end || (row_offset + num_rows) < begin)
         {
-            unused_large_block_index = static_cast<int>(i);
             continue;
         }
         end = std::min(end, row_offset + num_rows - 1);
         prepare(large_block);
         linearOrImpl(large_block, data, row_offset, end);
     }
-    if (unused_large_block_index > 0)
-        maybeEraseUnusedLargeBlocks(unused_large_block_index);
 }
 
 inline void padColumnForAnd(UInt8 * __restrict out, const std::vector<uint32_t> & current_values, size_t row_begin, size_t begin, size_t length)
@@ -557,25 +529,20 @@ void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out
 
 void PostingListCursor::linearAnd(UInt8 * data, size_t row_offset, size_t num_rows)
 {
-    int unused_large_block_index = -1;
-    for (size_t i = 0; i < large_blocks.size(); ++i)
+    for (size_t i = current_large_block_idx; i < total_large_blocks; ++i)
     {
-        auto large_block = large_blocks[i];
+        auto large_block = i;
         size_t begin = info.ranges[large_block].begin;
         size_t end = info.ranges[large_block].end;
 
         if (row_offset > end || (row_offset + num_rows) < begin)
         {
-            unused_large_block_index = static_cast<int>(i);
             continue;
         }
         end = std::min(end, row_offset + num_rows - 1);
-        prepare(large_blocks[i]);
+        prepare(large_block);
         linearAndImpl(large_block, data, row_offset, end);
     }
-
-    if (unused_large_block_index > 0)
-        maybeEraseUnusedLargeBlocks(unused_large_block_index);
 }
 
 namespace
