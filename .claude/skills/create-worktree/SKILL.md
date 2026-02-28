@@ -3,7 +3,7 @@ name: create-worktree
 description: Create a ClickHouse git worktree with submodules hardlinked from the main repo. Use when the user wants to create a new worktree for ClickHouse development.
 argument-hint: <branch-name>
 disable-model-invocation: false
-allowed-tools: Bash(git:*), Bash(cp:*), Bash(ln:*), Bash(ls:*), Bash(rm:*), Bash(mkdir:*), Bash(find:*), Bash(pwd:*), AskUserQuestion
+allowed-tools: Bash(git:*), Bash(cp:*), Bash(ln:*), Bash(ls:*), Bash(rm:*), Bash(mkdir:*), Bash(find:*), Bash(pwd:*), Bash(sed:*), Bash(xargs:*), Bash(echo:*), Bash(bash:*), Bash(for:*), Bash(awk:*), AskUserQuestion
 ---
 
 # Create ClickHouse Worktree Skill
@@ -86,28 +86,56 @@ find $GIT_DIR/worktrees/$WORKTREE_ENTRY/modules -name config -exec \
 # Fix them to use absolute paths pointing to the new worktree.
 find $GIT_DIR/worktrees/$WORKTREE_ENTRY/modules -name config.worktree -exec \
     sed -i "s|worktree = .*/contrib/|worktree = <WORKTREE_PATH>/contrib/|" {} +
-
-# Register submodules and write .git pointer files into contrib/ directories
-# (no network — uses hardlinked objects). This does NOT populate working trees.
-git -C <WORKTREE_PATH> submodule update
-
-# Populate submodule working trees. The previous command only writes .git pointer
-# files but leaves working trees empty because the hardlinked index files are empty.
-# We must explicitly reset each submodule's index from HEAD and checkout the files.
-# Some submodules may fail if their git data is incomplete — safe to skip.
-git -C <WORKTREE_PATH> submodule foreach \
-    '(git read-tree HEAD && git checkout -- .) 2>/dev/null || echo "SKIP: $name"'
 ```
 
-**Important:** `git submodule update` (without `--init`) is sufficient for the first step because the hardlinked modules directory already contains all the submodule git data. Everything is purely local — no network access occurs. However, it only creates `.git` pointer files in each `contrib/` subdirectory without populating the working trees. The subsequent `git read-tree HEAD && git checkout -- .` in each submodule is required to actually check out the files.
+### 6. Write `.git` pointer files and populate submodule working trees
 
-If `git submodule update` fails with errors about uninitialized submodules, run:
+**Do NOT use `git submodule update`** — it runs sequentially across all 129 submodules and takes ~55 seconds. Instead, write `.git` pointer files directly and checkout in parallel (~15 seconds total).
+
+#### 6a. Write `.git` pointer files
+
+Each submodule's `contrib/<name>/` directory needs a `.git` file (not directory) that points to the worktree's modules directory. The pattern is:
+
+```
+gitdir: ../../../.git/worktrees/<WORKTREE_ENTRY>/modules/contrib/<name>
+```
+
+All 129 submodules are under `contrib/` at uniform depth (3 levels from worktree root to `.git`), so the relative prefix `../../../` is constant.
+
+Get the list of submodules from `.gitmodules`:
 ```bash
-git -C <WORKTREE_PATH> submodule init
-git -C <WORKTREE_PATH> submodule update
+SUBMODULES=$(git -C <WORKTREE_PATH> config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}')
 ```
 
-### 6. Report results
+Write the `.git` pointer file for each submodule:
+```bash
+for sub in $SUBMODULES; do
+    name=$(basename "$sub")
+    mkdir -p "<WORKTREE_PATH>/$sub"
+    echo "gitdir: ../../../.git/worktrees/$WORKTREE_ENTRY/modules/contrib/$name" \
+        > "<WORKTREE_PATH>/$sub/.git"
+done
+```
+
+This takes ~0.2 seconds for all 129 submodules.
+
+#### 6b. Parallel checkout of submodule working trees
+
+Populate all submodule working trees in parallel using `xargs`:
+
+```bash
+echo "$SUBMODULES" | xargs -P 96 -I {} bash -c '
+    git -C "<WORKTREE_PATH>/{}" read-tree HEAD 2>/dev/null && \
+    git -C "<WORKTREE_PATH>/{}" checkout -- . 2>/dev/null || \
+    echo "SKIP: {}"
+'
+```
+
+This runs up to 96 submodule checkouts in parallel, completing in ~15 seconds (I/O bound). The largest submodules (llvm-project ~0.35s, aws ~0.28s, boost ~0.2s) dominate the wall time.
+
+**Why parallel?** The `git submodule foreach` command runs sequentially, and `git submodule update` in this git version does not support `--jobs`. Direct `xargs -P` parallelism is 3-4x faster.
+
+### 7. Report results
 
 Report to the user:
 - Source repo: `<MAIN_REPO>`
