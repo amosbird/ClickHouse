@@ -139,6 +139,11 @@ private:
 
     bool is_valid = true;
     bool is_embedded = false;
+    /// When true, decodeNextBlock will seek to the packed block offset before reading.
+    /// Set after prepare (Index Section read leaves stream at wrong position) and after
+    /// seekImpl (random jump). Cleared after the first seek so that sequential block
+    /// reads skip the redundant seek — the stream is already at the next block's start.
+    bool need_seek_before_decode = true;
     double density_val = 0;
 };
 

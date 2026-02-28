@@ -165,6 +165,7 @@ void PostingListCursor::prepare(size_t large_block_idx)
 
     current_block = 0;
     current_large_block_idx = large_block_idx;
+    need_seek_before_decode = true;
 
     /// Compute density
     const auto & range = info.ranges[large_block_idx];
@@ -204,7 +205,12 @@ bool PostingListCursor::decodeNextBlock()
     chassert(stream);
 
     chassert(current_block < packed_block_offsets.size());
-    stream->seek(packed_block_offsets[current_block]);
+
+    if (need_seek_before_decode)
+    {
+        stream->seek(packed_block_offsets[current_block]);
+        need_seek_before_decode = false;
+    }
 
     /// Compute delta base for the target packed block.
     if (current_block == 0)
@@ -330,6 +336,7 @@ bool PostingListCursor::seekImpl(uint32_t target)
     /// Random seek to the target packed block via `need_seek_before_decode`.
     /// Delta base and first_doc_id prepend are handled inside `decodeNextBlock`.
     current_block = j;
+    need_seek_before_decode = true;
     decodeNextBlock();
 
     /// Search within the decoded block
