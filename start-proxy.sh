@@ -1,6 +1,8 @@
 #!/bin/bash
 # Start the sccache proxy if it's not already running.
-# This script is idempotent — safe to call multiple times.
+# This script is idempotent and concurrency-safe — multiple callers can
+# invoke it simultaneously; only one will start the proxy, others will
+# wait and confirm it's running.
 #
 # Usage:
 #   ./start-proxy.sh           # start on default port 8083
@@ -15,6 +17,7 @@ PROXY_SCRIPT="$SCRIPT_DIR/sccache-proxy.py"
 CACHE_DIR="$SCRIPT_DIR/cache/sccache"
 LOG_FILE="$SCRIPT_DIR/cache/proxy.log"
 PID_FILE="$SCRIPT_DIR/cache/proxy.pid"
+LOCK_FILE="$SCRIPT_DIR/cache/proxy.lock"
 PORT="${SCCACHE_PROXY_PORT:-8083}"
 MAX_SIZE="${SCCACHE_PROXY_MAX_SIZE:-80}"
 
@@ -33,9 +36,18 @@ for arg in "$@"; do
     esac
 done
 
+find_proxy_pid() {
+    pgrep -f "python3 .*sccache-proxy\.py" 2>/dev/null | tail -1 || true
+}
+
+probe_port() {
+    curl -s --max-time 2 "http://localhost:$PORT/" >/dev/null 2>&1
+}
+
 is_running() {
     # First check PID file
     if [ -f "$PID_FILE" ]; then
+        local pid
         pid=$(cat "$PID_FILE")
         if kill -0 "$pid" 2>/dev/null; then
             return 0
@@ -43,9 +55,9 @@ is_running() {
         rm -f "$PID_FILE"
     fi
     # Fallback: probe the port directly (handles manually started instances)
-    if curl -s --max-time 2 "http://localhost:$PORT/" >/dev/null 2>&1; then
-        # Proxy is running but we don't have a PID file — try to find the PID
-        pid=$(pgrep -f "python3 .*sccache-proxy\.py" 2>/dev/null | tail -1 || true)
+    if probe_port; then
+        local pid
+        pid=$(find_proxy_pid)
         if [ -n "$pid" ]; then
             echo "$pid" >"$PID_FILE"
         fi
@@ -54,17 +66,17 @@ is_running() {
     return 1
 }
 
-case "$ACTION" in
-stop)
+do_stop() {
     if is_running; then
+        local pid
         if [ -f "$PID_FILE" ]; then
             pid=$(cat "$PID_FILE")
         else
-            pid=$(pgrep -f "python3 .*sccache-proxy\.py" 2>/dev/null | tail -1 || true)
+            pid=$(find_proxy_pid)
         fi
         if [ -n "$pid" ]; then
             echo "Stopping sccache proxy (PID $pid)..."
-            kill $pid 2>/dev/null || true
+            kill "$pid" 2>/dev/null || true
             rm -f "$PID_FILE"
             echo "Stopped."
         else
@@ -73,10 +85,11 @@ stop)
     else
         echo "Proxy is not running."
     fi
-    ;;
+}
 
-status)
+do_status() {
     if is_running; then
+        local pid
         if [ -f "$PID_FILE" ]; then
             pid=$(cat "$PID_FILE")
         else
@@ -88,17 +101,24 @@ status)
     else
         echo "Proxy is not running."
     fi
-    ;;
+}
 
-start)
-    if is_running; then
-        pid=$(cat "$PID_FILE")
-        echo "Proxy already running (PID $pid)"
-        curl -s "http://localhost:$PORT/" 2>/dev/null | python3 -m json.tool 2>/dev/null || true
-        exit 0
-    fi
-
+do_start() {
     mkdir -p "$(dirname "$LOG_FILE")"
+
+    # Use flock to serialize concurrent start attempts.
+    # All concurrent callers block here; only one proceeds at a time.
+    exec 9>"$LOCK_FILE"
+    flock 9
+
+    # Re-check inside the lock — another caller may have started it
+    if is_running; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null || echo "unknown")
+        echo "Proxy already running (PID $pid)"
+        exec 9>&-
+        return 0
+    fi
 
     echo "Starting sccache proxy on port $PORT..."
     echo "  Cache dir: $CACHE_DIR"
@@ -109,7 +129,7 @@ start)
         --port "$PORT" \
         --cache-dir "$CACHE_DIR" \
         --max-size "$MAX_SIZE" \
-        >>"$LOG_FILE" 2>&1 &
+        >>"$LOG_FILE" 2>&1 9>&- &
     echo $! >"$PID_FILE"
 
     # Wait briefly and verify it started
@@ -118,7 +138,16 @@ start)
         echo "Proxy started (PID $(cat "$PID_FILE"))"
     else
         echo "ERROR: Proxy failed to start. Check $LOG_FILE"
-        exit 1
+        exec 9>&-
+        return 1
     fi
-    ;;
+
+    # Release the lock
+    exec 9>&-
+}
+
+case "$ACTION" in
+stop) do_stop ;;
+status) do_status ;;
+start) do_start ;;
 esac
