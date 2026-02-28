@@ -1,14 +1,14 @@
 ---
 name: dev
-description: Integrated ClickHouse development workflow using worktrees, Docker-based builds via Praktika, and a local sccache proxy. Use when the user wants to develop a new feature or fix in an isolated worktree.
-argument-hint: <branch-name> [--build-type amd_binary|amd_debug|...] [--skip-cmake]
+description: Integrated ClickHouse development workflow using worktrees, Docker-based builds with build.sh, and a local sccache proxy. Use when the user wants to develop a new feature or fix in an isolated worktree.
+argument-hint: <branch-name> [--type release|debug|asan|tsan|msan|ubsan] [--no-cmake]
 disable-model-invocation: false
 allowed-tools: Bash(git:*), Bash(cp:*), Bash(ln:*), Bash(ls:*), Bash(rm:*), Bash(mkdir:*), Bash(docker:*), Bash(python:*), Bash(python3:*), Bash(curl:*), Bash(find:*), Bash(sed:*), Bash(pgrep:*), Bash(ps:*), Bash(kill:*), Bash(mktemp:*), Bash(du:*), Bash(wc:*), Bash(sleep:*), Bash(nohup:*), Bash(export:*), Bash(pwd:*), AskUserQuestion
 ---
 
 # ClickHouse Dev Workflow Skill
 
-Integrated workflow: create a worktree, build with Praktika inside Docker, with shared sccache via a local S3 cache proxy. Each worktree is an independent development environment with hardlinked submodule git objects (no extra disk, no network).
+Integrated workflow: create a worktree, build with `build.sh` inside Docker, with shared sccache via a local S3 cache proxy. Each worktree is an independent development environment with hardlinked submodule git objects (no extra disk, no network).
 
 ## Architecture
 
@@ -17,6 +17,7 @@ ClickHouse/                    ← meta branch (amos), repo root
 ├── src/                       ← main worktree (upstream/master)
 ├── my-feature/                ← feature worktree (sibling of src/)
 ├── fix-bug-123/               ← another worktree
+├── build.sh                   ← build script (docker + cmake + ninja + sccache)
 ├── sccache-proxy.py           ← local S3 cache proxy
 ├── cache/sccache/             ← sccache cache (gitignored)
 ├── cache/builds/<type>/       ← build directory seeds (gitignored)
@@ -31,47 +32,51 @@ ClickHouse/                    ← meta branch (amos), repo root
 **Key design decisions:**
 - Worktrees are **inside** the meta branch root (e.g., `ClickHouse/my-feature/`), NOT outside as siblings
 - Submodule git objects are shared via `cp -al` (hardlinks) — independent directories, shared disk blocks
-- Builds run inside Docker using Praktika (`python3 -m praktika run build`)
+- Builds run inside Docker via `./build.sh` (runs cmake + ninja + sccache automatically)
+- Build artifacts land in `<worktree>/build/` (NOT `ci/tmp/build/`)
 - sccache shares compilation cache across all worktrees via a local S3 proxy on port **8083**
 - Port 8083 chosen because port 9000 conflicts with ClickHouse native protocol
 
 ## Arguments
 
 - `$0` (required): Branch name for the new feature/fix
-- `--build-type` (optional): Praktika build type. Default: `amd_binary` (RelWithDebInfo). Options:
-  - `amd_binary` — RelWithDebInfo (default)
-  - `amd_debug` — Debug
-  - `amd_asan` — ASan
-  - `amd_tsan` — TSan
-  - `amd_msan` — MSan
-  - `amd_ubsan` — UBSan
-- `--skip-cmake` (optional): Skip cmake configuration, go straight to ninja. Use for incremental builds.
+- `--type` (optional): Build type. Default: `release`. Options:
+  - `release` — RelWithDebInfo (default)
+  - `debug` — Debug
+  - `asan` — ASan
+  - `tsan` — TSan
+  - `msan` — MSan
+  - `ubsan` — UBSan
+- `--no-cmake` (optional): Skip cmake, run ninja only. Use for incremental builds.
+
+## build.sh Usage
+
+```
+./build.sh [WORKTREE_PATH] [OPTIONS]
+
+Options:
+  --type TYPE     Build type: release, debug, asan, tsan, msan, ubsan (default: release)
+  --target TGT    Ninja target (default: clickhouse)
+  --cmake         Force cmake even if build.ninja exists
+  --no-cmake      Skip cmake, run ninja only
+  --no-seed       Don't use/update build seed
+  --cmake-only    Run cmake only, don't build
+  --shell         Drop into a shell inside the container
+```
+
+## How build.sh Works
+
+1. Ensures the sccache proxy is running on port 8083
+2. If build dir doesn't exist and a seed is available: `cp -al` seed → build dir (~590ms for 20GB)
+3. Patches `build.ninja` to remove `VerifyGlobs` from `RERUN_CMAKE` deps (prevents cmake re-run cascade)
+4. cmake decision: runs cmake **only** if `build.ninja` doesn't exist (first build from scratch). Skipped on seeded or existing builds. `--cmake` forces it; `--no-cmake` skips it.
+5. After cmake: patches `build.ninja` inside the container (post-cmake patching)
+6. Runs ninja inside the Docker container (`clickhouse/binary-builder:0261cd99929ade4b3e59_amd`)
+7. Updates the seed after a successful build (atomic via `flock`)
 
 ## Workflow
 
-### 1. Ensure sccache proxy is running
-
-Check if the proxy is running:
-```bash
-curl -s http://localhost:8083/ 2>/dev/null | python3 -c "import sys,json; json.load(sys.stdin)" && echo "Proxy is running" || echo "Proxy not running"
-```
-
-If not running, start it:
-```bash
-nohup python3 /tmp/gentoo/home/amos/git/ClickHouse/sccache-proxy.py \
-  --port 8083 \
-  --cache-dir /tmp/gentoo/home/amos/git/ClickHouse/cache/sccache \
-  --max-size 80 \
-  > /tmp/gentoo/home/amos/git/ClickHouse/cache/proxy.log 2>&1 &
-```
-
-Verify:
-```bash
-curl -s http://localhost:8083/
-```
-This returns JSON stats: `{"local_hits": 0, "upstream_hits": 0, ...}`
-
-### 2. Create worktree (if it doesn't exist)
+### 1. Create worktree (if it doesn't exist)
 
 **Determine repo root:**
 ```bash
@@ -90,7 +95,7 @@ If the branch already exists:
 git -C "$REPO_ROOT/src" worktree add "$WORKTREE_PATH" "$BRANCH"
 ```
 
-### 3. Set up submodules via hardlinks
+### 2. Set up submodules via hardlinks
 
 ```bash
 GIT_DIR=$(git -C "$REPO_ROOT/src" rev-parse --git-common-dir)
@@ -117,270 +122,94 @@ git -C "$WORKTREE_PATH" submodule foreach \
     '(git read-tree HEAD && git checkout -- .) 2>/dev/null || echo "SKIP: $name"'
 ```
 
-### 4. Apply CI patches (if not already present)
-
-The worktree needs five upstream-friendly patches for the dev workflow to work.
-Check if they're already applied before patching.
-
-**Patch 1: `ci/jobs/build_clickhouse.py`** — Use `setdefault` for sccache env vars
-
-Check: `grep -q "setdefault" "$WORKTREE_PATH/ci/jobs/build_clickhouse.py"`
-
-If not applied, change `os.environ["X"] = v` to `os.environ.setdefault("X", v)` for all sccache-related variables, and guard the `SCCACHE_S3_NO_CREDENTIALS` assignment behind a check for `SCCACHE_ENDPOINT`:
-```python
-# Before (original):
-os.environ["SCCACHE_BUCKET"] = Settings.S3_ARTIFACT_PATH
-...
-if info.is_local_run:
-    os.environ["SCCACHE_S3_NO_CREDENTIALS"] = "true"
-
-# After (patched):
-os.environ.setdefault("SCCACHE_BUCKET", Settings.S3_ARTIFACT_PATH)
-...
-if info.is_local_run:
-    if not os.environ.get("SCCACHE_ENDPOINT"):
-        os.environ["SCCACHE_S3_NO_CREDENTIALS"] = "true"
-```
-
-**Patch 2: `ci/praktika/runner.py`** — Forward host env vars into Docker
-
-Add `PRAKTIKA_DOCKER_PASSTHROUGH` support before the Docker `cmd =` line:
-```python
-# Forward host env vars matching PRAKTIKA_DOCKER_PASSTHROUGH into Docker.
-passthrough_envs = ""
-prefixes = os.environ.get("PRAKTIKA_DOCKER_PASSTHROUGH", "")
-if prefixes:
-    prefix_list = [p.strip() for p in prefixes.split(",") if p.strip()]
-    for env_name, env_val in os.environ.items():
-        if any(env_name.startswith(p) for p in prefix_list):
-            passthrough_envs += f" -e {env_name}={env_val}"
-```
-Then include `{passthrough_envs}` in the `docker run` command string.
-
-**Patch 3: `ci/praktika/runner.py`** — Extra Docker volume mounts
-
-Add `PRAKTIKA_DOCKER_EXTRA_MOUNTS` support in the `extra_mounts` construction block:
-```python
-# Mount additional host paths into Docker via PRAKTIKA_DOCKER_EXTRA_MOUNTS.
-# Comma-separated list of Docker --volume specs, e.g.
-# "/host/path:/container/path:ro,/another:/another"
-docker_extra_mounts = os.environ.get("PRAKTIKA_DOCKER_EXTRA_MOUNTS", "")
-if docker_extra_mounts:
-    for mount in docker_extra_mounts.split(","):
-        mount = mount.strip()
-        if mount:
-            extra_mounts += f" --volume {mount}"
-```
-
-This is **required for worktrees** — the worktree's `.git` file references the parent repo's
-`.git/worktrees/<name>/` directory, which is outside the Docker volume mount. Without this,
-`git submodule` commands fail inside Docker with `fatal: not a git repository`.
-
-**Patch 4: `ci/praktika/runner.py`** — Custom container name
-
-Add `PRAKTIKA_CONTAINER_NAME` support for the Docker container name:
-```python
-container_name = os.environ.get("PRAKTIKA_CONTAINER_NAME", "praktika")
-```
-Required for parallel builds since two Docker containers can't share the same name.
-
-**Patch 5: `ci/jobs/build_clickhouse.py`** — Smart checkout skip for local runs
-
-The `do_checkout` function is modified to skip the expensive network-based submodule
-update when submodules are already populated (e.g., via hardlinked worktree setup).
-On local runs, it checks `git submodule status` for uninitialized entries ("-" prefix);
-if all submodules are initialized, it skips `contrib/update-submodules.sh` entirely.
-```python
-def do_checkout():
-    # On local runs, skip the expensive network-based submodule update
-    # if submodules are already populated (e.g. via hardlinked worktree
-    # setup).  Check by looking for uninitialized ("-" prefix) entries
-    # in `git submodule status`.
-    if info.is_local_run:
-        out = Shell.get_output("git submodule status")
-        if out:
-            uninitialized = [
-                line
-                for line in out.splitlines()
-                if line.strip().startswith("-")
-            ]
-            if not uninitialized:
-                print(
-                    "NOTE: All submodules already initialized — skipping network update (local run)"
-                )
-                Shell.check(f"mkdir -p {build_dir}")
-                return True
-
-    res = Shell.check(
-        f"mkdir -p {build_dir} && git submodule sync && git submodule init"
-    )
-    res = res and Shell.check(
-        "contrib/update-submodules.sh --max-procs 10",
-        retries=3,
-    )
-    return res
-```
-This saves ~30 seconds on each build by avoiding unnecessary network fetches.
-
-### 5. Seed build directory (if empty)
-
-Before running Praktika, check if the worktree already has a build directory.
-If not, copy one from the seed cache. This eliminates cmake reconfiguration (~44s → ~5s)
-and Rust crate recompilation (754 crates → 0) on new worktrees. C++ `.o` files are also
-copied but ninja will rebuild them (mtime mismatch — see notes below); sccache handles those.
-
-The seed is safe to copy because Praktika mounts every worktree as `--volume .:/ClickHouse`,
-so `CMakeCache.txt` always records `CMAKE_SOURCE_DIR=/ClickHouse` and
-`CMAKE_BINARY_DIR=/ClickHouse/ci/tmp/build` — identical paths regardless of host worktree location.
+### 3. Build
 
 ```bash
-BUILD_TYPE="amd_binary"  # or whatever --build-type was requested
-SEED_DIR="$REPO_ROOT/cache/builds/$BUILD_TYPE"
-SEED_LOCK="$REPO_ROOT/cache/builds/seed.lock"
-BUILD_DIR="$WORKTREE_PATH/ci/tmp/build"
-
-if [ ! -d "$BUILD_DIR" ]; then
-    mkdir -p "$WORKTREE_PATH/ci/tmp"
-    mkdir -p "$(dirname "$SEED_DIR")"
-    touch "$SEED_LOCK"
-    flock -s "$SEED_LOCK" bash -c '
-      if [ -d "'"$SEED_DIR"'" ]; then
-        cp -al "'"$SEED_DIR"'/" "'"$BUILD_DIR"'/"
-        echo "Seeded build directory from $SEED_DIR"
-      else
-        echo "No seed found — building from scratch"
-      fi
-    '
-fi
+cd "$REPO_ROOT"
+./build.sh "$WORKTREE_PATH"
 ```
 
-**Notes:**
-- `flock -s` (shared lock) allows multiple worktrees to read the seed concurrently
-- `cp -al` uses hardlinks — fast copy, no extra disk until files diverge
-- If no seed exists yet (first ever build), the build proceeds from scratch and creates the seed afterward (step 9)
-- The seed directory is per build type: `cache/builds/amd_binary/`, `cache/builds/amd_debug/`, etc.
-- **Ninja mtime behavior**: ninja compares recorded mtime in `.ninja_log` against current source
-  file mtime. Since `git worktree add` checks out sources with fresh timestamps, all `.o` files
-  will be marked dirty and recompiled. This is expected — sccache provides ~100% hit rate for
-  unchanged sources. The seed's value comes from cmake state and Rust/cargo artifacts.
-- **Rust PATH deps**: Cargo uses mtime-based fingerprinting for PATH dependencies (e.g.,
-  `contrib/delta-kernel-rs/`, `contrib/wasmtime/`). The `CARGO_UNSTABLE_CHECKSUM_FRESHNESS=true`
-  env var (set in step 6) switches cargo to content-based checksums, eliminating ~16s of
-  unnecessary recompilation when source file timestamps differ but content is identical.
-
-### 6. Build with Praktika
-
-**Set environment variables:**
+For a specific build type:
 ```bash
-REPO_ROOT="/tmp/gentoo/home/amos/git/ClickHouse"
-WORKTREE_NAME="$(basename "$WORKTREE_PATH")"
-
-export PYTHONPATH=".:./ci"
-export PRAKTIKA_DOCKER_PASSTHROUGH="SCCACHE_,AWS_,CARGO_UNSTABLE_"
-export SCCACHE_ENDPOINT="http://localhost:8083"
-export AWS_ACCESS_KEY_ID="local"
-export AWS_SECRET_ACCESS_KEY="local"
-
-# Cargo: use content-based checksums instead of mtime for rebuild detection.
-# This prevents ~16s of unnecessary recompilation of PATH dependencies
-# (delta-kernel-rs, wasmtime) when source files have fresh timestamps from git checkout.
-# Requires nightly cargo (ClickHouse uses nightly-2025-07-07).
-# See: https://github.com/rust-lang/cargo/issues/14136
-export CARGO_UNSTABLE_CHECKSUM_FRESHNESS=true
-
-# Required for worktrees — mount the parent .git directory into Docker
-export PRAKTIKA_DOCKER_EXTRA_MOUNTS="$REPO_ROOT/.git:$REPO_ROOT/.git"
-
-# Each worktree gets a unique container name and sccache server port.
-# This is REQUIRED for parallel builds — without it, two containers on
-# --network=host would share port 4226, causing cross-contamination
-# (server in container A compiles container B's requests with wrong files).
-export PRAKTIKA_CONTAINER_NAME="praktika-$WORKTREE_NAME"
-export SCCACHE_SERVER_PORT=$("$REPO_ROOT/allocate-port.sh" "$WORKTREE_NAME")
+./build.sh "$WORKTREE_PATH" --type debug
 ```
 
-**Run the build:**
+For incremental builds (skip cmake, ninja only):
 ```bash
-cd "$WORKTREE_PATH"
-python3 -m praktika run build
+./build.sh "$WORKTREE_PATH" --no-cmake
 ```
 
-This is an alias for `Build (amd_binary)`. Other aliases:
-- `build_debug` → `Build (amd_debug)`
-- `fast` → `Fast test`
-- `functional` → Functional test
-
-For specific build types:
+To drop into a shell inside the container for debugging:
 ```bash
-python3 -m praktika run "Build (amd_debug)"
+./build.sh "$WORKTREE_PATH" --shell
 ```
 
-**To skip cmake** (incremental builds after the first full build):
-```bash
-python3 -m praktika run build --param cmake
-```
-
-The `--param cmake` flag causes the build script to skip the cmake configure step.
-
-### 7. Monitor build progress
+### 4. Monitor build progress
 
 ```bash
-# Watch Docker container logs (use container name from PRAKTIKA_CONTAINER_NAME)
-docker logs -f praktika-$(basename $WORKTREE_PATH)
+# Watch Docker container logs (container name is build-<worktree-name>)
+docker logs -f build-$(basename "$WORKTREE_PATH")
 
 # Check sccache proxy stats
 curl -s http://localhost:8083/ | python3 -m json.tool
 
 # Check if binary was produced
-ls -la "$WORKTREE_PATH/ci/tmp/build/programs/clickhouse"
+ls -la "$WORKTREE_PATH/build/programs/clickhouse"
 ```
 
-**Build output location**: The build happens inside Docker at `/ClickHouse/ci/tmp/build/`.
-Since Praktika mounts `./` into Docker as `--volume .:/ClickHouse`, the build artifacts
-appear at `$WORKTREE_PATH/ci/tmp/build/programs/clickhouse` on the host.
+**Build output location**: `$WORKTREE_PATH/build/programs/clickhouse`
 
-### 8. Report results
+### 5. Report results
 
 Report to user:
 - Worktree: `$WORKTREE_PATH`
 - Branch: `$BRANCH`
 - Build status: success/failed
-- Binary: `$WORKTREE_PATH/ci/tmp/build/programs/clickhouse`
+- Binary: `$WORKTREE_PATH/build/programs/clickhouse`
 - sccache stats (hit rate, errors)
 
-### 9. Update build seed (after successful build)
+## Performance
 
-After a successful build, atomically update the seed directory so future worktrees
-benefit from the cached cmake state and compiled Rust crates.
+| Scenario | Time |
+|---|---|
+| Seeded no-op build (no changes) | ~1 second (ninja: no work to do) |
+| Incremental build (1 file changed) | ~11 seconds (1 compile + 2 link steps) |
+| From-scratch build | ~25 minutes |
+| sccache hit rate (warm cache) | ~100% |
 
-```bash
-BUILD_TYPE="amd_binary"  # same as step 5
-SEED_DIR="$REPO_ROOT/cache/builds/$BUILD_TYPE"
-SEED_LOCK="$REPO_ROOT/cache/builds/seed.lock"
-BUILD_DIR="$WORKTREE_PATH/ci/tmp/build"
+## Docker Image
 
-mkdir -p "$(dirname "$SEED_DIR")"
-touch "$SEED_LOCK"
-flock "$SEED_LOCK" bash -c '
-  rm -rf "'"$SEED_DIR"'.old"
-  mv "'"$SEED_DIR"'" "'"$SEED_DIR"'.old" 2>/dev/null
-  cp -al "'"$BUILD_DIR"'/" "'"$SEED_DIR"'"
-  rm -rf "'"$SEED_DIR"'.old" &
-'
-echo "Build seed updated: $SEED_DIR"
-```
+- Image: `clickhouse/binary-builder:0261cd99929ade4b3e59_amd`
+- Contains: clang-21, cmake 4.1.2, ninja 1.12.1, sccache 0.10.0
+- Container mount: worktree → `/ClickHouse`
+- Container name: `build-<worktree-name>` (unique per worktree, safe for parallel builds)
 
-**Notes:**
-- `flock` (exclusive lock) blocks concurrent seed reads/writes during the update
-- Two-step `mv`: rename old seed → `.old`, then hardlink-copy new build → seed. This is safe
-  because `rename(2)` on Linux returns `ENOTEMPTY` for non-empty directories, so a single
-  `mv -T` cannot atomically replace — we use flock for mutual exclusion instead.
-- `rm -rf .old &` runs in background — cleanup doesn't block the workflow
-- Only update after a **successful** build — never seed a broken build directory
+## cmake Flags
+
+- `-DENABLE_RUST=0` (disabled for speed)
+- `-DENABLE_THINLTO=0` (disabled for speed)
+- `-DENABLE_TESTS=1` (tests enabled)
+- `-DCOMPILER_CACHE=sccache`
+- Toolchain: `cmake/linux/toolchain-x86_64.cmake`
+
+## Build Directory and Seed
+
+- **Build dir**: `<worktree>/build/` (created by `build.sh`, or seeded from `cache/builds/<type>/`)
+- **Seed**: `cache/builds/<type>/` — hardlink copy of a prior successful build dir
+- **Seeding**: `build.sh` performs `cp -al` seed → build dir at startup (~590ms for 20GB)
+- **Seed update**: after a successful build, `build.sh` atomically replaces the seed via `flock`
+
+The seed is safe across worktrees because `build.sh` mounts every worktree as `--volume .:/ClickHouse`, so `CMakeCache.txt` always records `CMAKE_SOURCE_DIR=/ClickHouse` and `CMAKE_BINARY_DIR=/ClickHouse/build` — identical paths regardless of host worktree location.
+
+**Critical warnings — do NOT:**
+- Touch `.o`/`.a` files or run `ninja -t restat` on seeded builds — causes mtime inconsistency → full rebuild
+- Run cmake unnecessarily — `VerifyGlobs` causes `build.ninja` regeneration → full rebuild
+- Use Praktika (obsolete approach)
+- Use `-j` with ninja (let it decide automatically)
 
 ## sccache Proxy Details
 
-The proxy (`sccache-proxy.py`) is a Python HTTP server that acts as a local S3-compatible endpoint:
+The proxy (`sccache-proxy.py`) is a Python HTTP server that acts as a local S3-compatible endpoint. `build.sh` starts it automatically if it isn't running; port 8083 is always used.
 
 - **On GET**: Check local cache → on miss, fetch from `s3.us-east-1.amazonaws.com`, cache locally, return
 - **On PUT**: Store to local cache only (captures local compilation artifacts)
@@ -396,44 +225,21 @@ The proxy (`sccache-proxy.py`) is a Python HTTP server that acts as a local S3-c
 - `puts` — stored locally (your compilation output)
 - `errors` — any failures
 
-## Examples
-
-- `/dev my-feature` — Create worktree, start proxy, build with Praktika
-- `/dev fix-bug-123 --skip-cmake` — Incremental build (skip cmake step)
-- `/dev my-feature --build-type amd_debug` — Build in Debug mode
-
-## Notes
-
-- Worktrees are placed inside the repo root (e.g., `ClickHouse/my-feature/`), NOT outside
-- Submodules use hardlinks (`cp -al`) from `src` worktree — ~21GB shared, no extra disk
-- The sccache proxy runs on port **8083** (NOT 9000 — that conflicts with ClickHouse native protocol)
-- Docker containers use `--network=host`, so they can reach `localhost:8083` on the host
-- sccache inside Docker images is v0.10.0, installed in the fasttest base image
-- The five CI patches are designed to be upstream-friendly (general-purpose mechanisms, no hardcoded overrides)
-- sccache uses OpenDAL library, makes only `GetObject` and `PutObject` S3 API calls
-- First build in a new worktree uses seeded build directory (step 5) for cmake and Rust cache; subsequent builds can skip cmake with `--param cmake`
-- Build target is `ninja clickhouse-bundle` (includes clickhouse binary and all tools)
-
 ## Parallel Builds
 
 Multiple worktrees can be built in parallel. Each worktree is fully isolated:
 
-- **Unique container name**: `PRAKTIKA_CONTAINER_NAME=praktika-<worktree-name>`
-- **Unique sccache port**: `SCCACHE_SERVER_PORT` allocated via `allocate-port.sh` (range 4227–4326)
+- **Unique container name**: `build-<worktree-name>` (assigned automatically by `build.sh`)
+- **Unique sccache port**: allocated via `allocate-port.sh` (range 4227–4326)
   - Each container starts its own sccache server on its own port, fully isolated
-  - Without this, two containers on `--network=host` would share port 4226, causing the
-    server in container A to compile container B's requests with wrong source files
-- **Shared cache**: All builds share the same local S3 proxy on port 8083, so compilation
-  artifacts from one worktree benefit all others
-- Heavy resource contention (2× compile jobs) may cause sporadic failures — consider
-  limiting concurrency via ninja's auto-detection or staggering builds
-- Cache performance observed: first build ~50% upstream hits; second build ~100% local hits
+  - Without this, two containers on `--network=host` would share port 4226, causing cross-contamination
+- **Shared cache**: All builds share the same local S3 proxy on port 8083, so compilation artifacts from one worktree benefit all others
 
 ### Port allocation
 
 ```bash
 # Allocate a port (idempotent — same worktree always gets the same port)
-export SCCACHE_SERVER_PORT=$(./allocate-port.sh my-feature)
+./allocate-port.sh my-feature
 
 # List all allocations
 ./allocate-port.sh --list
@@ -441,6 +247,22 @@ export SCCACHE_SERVER_PORT=$(./allocate-port.sh my-feature)
 # Release a port after removing a worktree
 ./allocate-port.sh --release my-feature
 ```
+
+## Examples
+
+- `/dev my-feature` — Create worktree, build with `build.sh` (release)
+- `/dev fix-bug-123 --no-cmake` — Incremental build (skip cmake)
+- `/dev my-feature --type debug` — Build in Debug mode
+- `/dev my-feature --type asan` — Build with ASan
+
+## Notes
+
+- Worktrees are placed inside the repo root (e.g., `ClickHouse/my-feature/`), NOT outside
+- Submodules use hardlinks (`cp -al`) from `src` worktree — ~21GB shared, no extra disk
+- The sccache proxy runs on port **8083** (NOT 9000 — that conflicts with ClickHouse native protocol)
+- Docker containers use `--network=host`, so they can reach `localhost:8083` on the host
+- sccache inside the Docker image is v0.10.0
+- `build.sh` handles the entire build lifecycle: sccache proxy, seeding, cmake, ninja, seed update
 
 ## Submodule + Worktree Sharing: Design Notes
 
