@@ -187,6 +187,9 @@ Required for parallel builds since two Docker containers can't share the same na
 
 **Set environment variables:**
 ```bash
+REPO_ROOT="/tmp/gentoo/home/amos/git/ClickHouse"
+WORKTREE_NAME="$(basename "$WORKTREE_PATH")"
+
 export PYTHONPATH=".:./ci"
 export PRAKTIKA_DOCKER_PASSTHROUGH="SCCACHE_,AWS_"
 export SCCACHE_ENDPOINT="http://localhost:8083"
@@ -194,11 +197,14 @@ export AWS_ACCESS_KEY_ID="local"
 export AWS_SECRET_ACCESS_KEY="local"
 
 # Required for worktrees — mount the parent .git directory into Docker
-REPO_ROOT="/tmp/gentoo/home/amos/git/ClickHouse"
 export PRAKTIKA_DOCKER_EXTRA_MOUNTS="$REPO_ROOT/.git:$REPO_ROOT/.git"
 
-# For parallel builds, each container needs a unique name
-export PRAKTIKA_CONTAINER_NAME="praktika-$(basename $WORKTREE_PATH)"
+# Each worktree gets a unique container name and sccache server port.
+# This is REQUIRED for parallel builds — without it, two containers on
+# --network=host would share port 4226, causing cross-contamination
+# (server in container A compiles container B's requests with wrong files).
+export PRAKTIKA_CONTAINER_NAME="praktika-$WORKTREE_NAME"
+export SCCACHE_SERVER_PORT=$("$REPO_ROOT/allocate-port.sh" "$WORKTREE_NAME")
 ```
 
 **Run the build:**
@@ -288,13 +294,28 @@ The proxy (`sccache-proxy.py`) is a Python HTTP server that acts as a local S3-c
 
 ## Parallel Builds
 
-Multiple worktrees can be built in parallel, but **sequentially is safer**:
+Multiple worktrees can be built in parallel. Each worktree is fully isolated:
 
-- Each parallel build needs a unique container name (`PRAKTIKA_CONTAINER_NAME`)
-- With `--network=host`, sccache servers conflict on port 4226 — the second build's sccache
-  server fails to start, but its client reuses the first build's running server (this works fine)
-- Heavy resource contention (2x 96 compile jobs) can cause sporadic build failures in sub-builds
-  (e.g., clang-builtins archive step fails with "No such file or directory")
-- **Recommendation**: Build worktrees sequentially to avoid resource contention. The local
-  sccache cache means the second build is nearly 100% cache hits and completes much faster.
+- **Unique container name**: `PRAKTIKA_CONTAINER_NAME=praktika-<worktree-name>`
+- **Unique sccache port**: `SCCACHE_SERVER_PORT` allocated via `allocate-port.sh` (range 4227–4326)
+  - Each container starts its own sccache server on its own port, fully isolated
+  - Without this, two containers on `--network=host` would share port 4226, causing the
+    server in container A to compile container B's requests with wrong source files
+- **Shared cache**: All builds share the same local S3 proxy on port 8083, so compilation
+  artifacts from one worktree benefit all others
+- Heavy resource contention (2× compile jobs) may cause sporadic failures — consider
+  limiting concurrency via ninja's auto-detection or staggering builds
 - Cache performance observed: first build ~50% upstream hits; second build ~100% local hits
+
+### Port allocation
+
+```bash
+# Allocate a port (idempotent — same worktree always gets the same port)
+export SCCACHE_SERVER_PORT=$(./allocate-port.sh my-feature)
+
+# List all allocations
+./allocate-port.sh --list
+
+# Release a port after removing a worktree
+./allocate-port.sh --release my-feature
+```
