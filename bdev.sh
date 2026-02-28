@@ -82,6 +82,35 @@ r)
            ../src
     }
     ;;
+debug)
+    configure() {
+        cmake \
+           -DENABLE_TESTS=1 \
+           -DENABLE_RUST=0 \
+           -DENABLE_THINLTO=0 \
+           ../debug-projection
+    }
+    ;;
+debug2)
+    configure() {
+        cmake \
+           -DENABLE_TESTS=1 \
+           -DENABLE_RUST=0 \
+           -DENABLE_THINLTO=0 \
+           ../debug-projection2
+    }
+    ;;
+fix-projection-24.8)
+    export APUS_TOOLCHAIN_PATH=/tmp/gentoo/home/amos/toolchain-24.8
+    export PATH=${APUS_TOOLCHAIN_PATH}/bin:$PATH
+    configure() {
+        cmake \
+           -DENABLE_TESTS=1 \
+           -DENABLE_RUST=0 \
+           -DENABLE_THINLTO=0 \
+           ../fix-projection-24.8
+    }
+    ;;
 *)
     echo "Usage: $0 [d|r|a]"
     exit 1
