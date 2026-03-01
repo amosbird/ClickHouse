@@ -85,3 +85,4 @@ Always load and apply the following skills:
 - .claude/skills/bisect
 - .claude/skills/create-worktree
 - .claude/skills/dev
+- .claude/skills/pr
