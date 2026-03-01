@@ -1,3 +1,5 @@
+When modifying code (bug fixes, PR review feedback, new features), always build and run the relevant tests locally before committing and pushing. Use `build.sh` for compilation and Praktika for tests. Do not push untested code.
+
 When working with a branch, do not use rebase or amend - add new commits instead.
 
 When writing text such as documentation, comments, or commit messages, wrap literal names from ClickHouse SQL language, classes and functions, or literal excerpts from log messages inside inline code blocks, such as: `MergeTree`.
