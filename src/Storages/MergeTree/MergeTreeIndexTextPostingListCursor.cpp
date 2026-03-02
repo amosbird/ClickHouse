@@ -366,38 +366,65 @@ void PostingListCursor::next()
     }
 }
 
-/// Scatter-write 1s into `out` for doc_ids in values[begin..length).
-/// 4-wide loop with prefetch for cache-line utilization.
-inline void padColumnForOr(UInt8 * __restrict out, const uint32_t * values, size_t row_begin, size_t begin, size_t length)
-{
-    const uint32_t * data_begin = values + begin;
-    const uint32_t * data_end = values + length;
+enum class PadOp { Or, And };
 
-    if (data_begin >= data_end)
+/// Scatter-write into `out` for doc_ids in values[begin..length).
+/// PadOp::Or assigns 1, PadOp::And increments the counter.
+/// 4-wide loop with prefetch for cache-line utilization.
+template <PadOp op>
+inline void padColumn(UInt8 * __restrict out, const uint32_t * values, size_t row_begin, size_t begin, size_t length)
+{
+    const uint32_t * p = values + begin;
+    const uint32_t * end = values + length;
+
+    if (p >= end)
         return;
 
-    const uint32_t * p = data_begin;
-    const size_t count = data_end - data_begin;
-
-    const uint32_t * loop_end = data_begin + (count / 4) * 4;
+    const size_t count = static_cast<size_t>(end - p);
+    const uint32_t * loop_end = p + (count / 4) * 4;
 
     for (; p < loop_end; p += 4)
     {
         __builtin_prefetch(p + 16, 0, 3);
-        if (p + 4 < data_end)
-            __builtin_prefetch(&out[p[4] - row_begin], 1, 0);
+        if (p + 8 < end)
+            __builtin_prefetch(&out[p[8] - row_begin], 1, 0);
 
-        out[p[0] - row_begin] = 1;
-        out[p[1] - row_begin] = 1;
-        out[p[2] - row_begin] = 1;
-        out[p[3] - row_begin] = 1;
+        if constexpr (op == PadOp::Or)
+        {
+            out[p[0] - row_begin] = 1;
+            out[p[1] - row_begin] = 1;
+            out[p[2] - row_begin] = 1;
+            out[p[3] - row_begin] = 1;
+        }
+        else
+        {
+            ++out[p[0] - row_begin];
+            ++out[p[1] - row_begin];
+            ++out[p[2] - row_begin];
+            ++out[p[3] - row_begin];
+        }
     }
 
-    switch (data_end - p)
+    switch (end - p)
     {
-        case 3: out[p[2] - row_begin] = 1; [[fallthrough]];
-        case 2: out[p[1] - row_begin] = 1; [[fallthrough]];
-        case 1: out[p[0] - row_begin] = 1; [[fallthrough]];
+        case 3:
+            if constexpr (op == PadOp::Or)
+                out[p[2] - row_begin] = 1;
+            else
+                ++out[p[2] - row_begin];
+            [[fallthrough]];
+        case 2:
+            if constexpr (op == PadOp::Or)
+                out[p[1] - row_begin] = 1;
+            else
+                ++out[p[1] - row_begin];
+            [[fallthrough]];
+        case 1:
+            if constexpr (op == PadOp::Or)
+                out[p[0] - row_begin] = 1;
+            else
+                ++out[p[0] - row_begin];
+            [[fallthrough]];
         default: break;
     }
 }
@@ -414,7 +441,7 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
         size_t begin_idx = static_cast<size_t>(it - decoded_values);
         auto it_end = std::upper_bound(decoded_values, decoded_values + decoded_count, row_end);
         size_t end_idx = it_end - decoded_values;
-        padColumnForOr(out, decoded_values, row_begin, begin_idx, end_idx);
+        padColumn<PadOp::Or>(out, decoded_values, row_begin, begin_idx, end_idx);
         return;
     }
 
@@ -483,12 +510,12 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
                 end_idx = static_cast<size_t>(it_end - decoded_values);
             }
 
-            padColumnForOr(out, decoded_values, row_begin, begin_idx, end_idx);
+            padColumn<PadOp::Or>(out, decoded_values, row_begin, begin_idx, end_idx);
         }
         else
         {
             /// Entire block is within [row_begin, row_end] — no clipping needed.
-            padColumnForOr(out, decoded_values, row_begin, 0, decoded_count);
+            padColumn<PadOp::Or>(out, decoded_values, row_begin, 0, decoded_count);
         }
     }
 }
@@ -513,37 +540,6 @@ void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_row
     }
 }
 
-/// Scatter-increment counters in `out` for doc_ids in values[begin..length).
-/// 4-wide loop with prefetch for cache-line utilization.
-inline void padColumnForAnd(UInt8 * __restrict out, const uint32_t * values, size_t row_begin, size_t begin, size_t length)
-{
-    const uint32_t *p = values + begin;
-    const uint32_t *end = values + length;
-
-    for (; p + 4 <= end; p += 4)
-    {
-        __builtin_prefetch(p + 16, 0, 3);
-        if (p + 8 < end)
-            __builtin_prefetch(&out[p[8] - row_begin], 1, 0);
-
-        ++out[p[0] - row_begin];
-        ++out[p[1] - row_begin];
-        ++out[p[2] - row_begin];
-        ++out[p[3] - row_begin];
-    }
-
-    switch (end - p)
-    {
-        case 3: ++out[p[2] - row_begin];
-            [[fallthrough]];
-        case 2: ++out[p[1] - row_begin];
-            [[fallthrough]];
-        case 1: ++out[p[0] - row_begin];
-            [[fallthrough]];
-        default: break;
-    }
-}
-
 void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out, size_t row_begin, size_t row_end)
 {
     chassert(large_block < info.ranges.size());
@@ -556,7 +552,7 @@ void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out
         size_t idx = static_cast<size_t>(it - decoded_values);
         auto it_end = std::upper_bound(decoded_values, decoded_values + decoded_count, row_end);
         size_t length = it_end - decoded_values;
-        padColumnForAnd(out, decoded_values, row_begin, idx, length);
+        padColumn<PadOp::And>(out, decoded_values, row_begin, idx, length);
         return;
     }
 
@@ -609,11 +605,11 @@ void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out
                 end_idx = static_cast<size_t>(it_end - decoded_values);
             }
 
-            padColumnForAnd(out, decoded_values, row_begin, begin_idx, end_idx);
+            padColumn<PadOp::And>(out, decoded_values, row_begin, begin_idx, end_idx);
         }
         else
         {
-            padColumnForAnd(out, decoded_values, row_begin, 0, decoded_count);
+            padColumn<PadOp::And>(out, decoded_values, row_begin, 0, decoded_count);
         }
     }
 }
