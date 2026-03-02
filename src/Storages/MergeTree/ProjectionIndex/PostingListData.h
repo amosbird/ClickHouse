@@ -197,6 +197,10 @@ using LazyPostingStreamPtr = std::unique_ptr<LazyPostingStream>;
 
 inline static constexpr UInt64 MAX_SIZE_OF_EMBEDDED_POSTINGS = 6;
 
+/// TurboPFor encodes/decodes deltas in fixed 128-element blocks.
+/// This constant is dictated by the TurboPFor library and must NOT be changed.
+inline static constexpr size_t TURBOPFOR_BLOCK_SIZE = 128;
+
 struct alignas(8) PostingListStream
 {
     PostingListKind type = PostingListKind::Stream;

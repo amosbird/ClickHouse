@@ -217,7 +217,7 @@ bool PostingListCursor::decodeNextBlock()
     UInt32 bytes;
     readPrefixVarUInt32(bytes, data_buf);
 
-    UInt32 count = (current_block + 1 == block_count && tail_size > 0) ? static_cast<UInt32>(tail_size) : 128U;
+    UInt32 count = (current_block + 1 == block_count && tail_size > 0) ? static_cast<UInt32>(tail_size) : static_cast<UInt32>(TURBOPFOR_BLOCK_SIZE);
 
     uint8_t * src_ptr;
     if (data_buf.available() >= bytes)
@@ -241,8 +241,8 @@ bool PostingListCursor::decodeNextBlock()
     decoded_count = actual_count;
     uint32_t * decode_dst = decoded_values + (prepend_first_doc_id ? 1 : 0);
 
-    if (count == 128)
-        turbopfor::p4D1Dec128v32(src_ptr, 128, decode_dst, last_decoded_doc_id);
+    if (count == TURBOPFOR_BLOCK_SIZE)
+        turbopfor::p4D1Dec128v32(src_ptr, TURBOPFOR_BLOCK_SIZE, decode_dst, last_decoded_doc_id);
     else
         turbopfor::p4D1Dec32(src_ptr, count, decode_dst, last_decoded_doc_id);
 

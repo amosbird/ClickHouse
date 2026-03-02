@@ -144,7 +144,7 @@ Block tokenize(
     const ColumnUInt8::Container * null_map,
     const IColumn * index_column)
 {
-    alignas(16) uint8_t packed_buffer[128 * 4];
+    alignas(16) uint8_t packed_buffer[TURBOPFOR_BLOCK_SIZE * 4];
     ssize_t rows = array_offsets ? array_offsets->size() : (index_column ? index_column->size() : input_data_column.size());
     chassert(rows <= std::numeric_limits<UInt32>::max());
 

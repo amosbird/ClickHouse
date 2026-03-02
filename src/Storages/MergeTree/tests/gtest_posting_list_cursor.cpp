@@ -248,8 +248,8 @@ MultiBlockTestData makeMultiBlockData(const std::vector<std::vector<uint32_t>> &
         }
 
         UInt32 large_block_doc_count = static_cast<UInt32>(docs_to_encode.size());
-        UInt32 num_full_blocks = large_block_doc_count / 128;
-        UInt32 tail_count = large_block_doc_count % 128;
+        UInt32 num_full_blocks = large_block_doc_count / TURBOPFOR_BLOCK_SIZE;
+        UInt32 tail_count = large_block_doc_count % TURBOPFOR_BLOCK_SIZE;
         UInt32 num_packed_blocks = num_full_blocks + (tail_count > 0 ? 1 : 0);
 
         /// Data Section: encode packed blocks
@@ -262,7 +262,7 @@ MultiBlockTestData makeMultiBlockData(const std::vector<std::vector<uint32_t>> &
 
         for (UInt32 pb = 0; pb < num_packed_blocks; ++pb)
         {
-            UInt32 count = (pb == num_packed_blocks - 1 && tail_count > 0) ? tail_count : 128;
+            UInt32 count = (pb == num_packed_blocks - 1 && tail_count > 0) ? tail_count : static_cast<UInt32>(TURBOPFOR_BLOCK_SIZE);
 
             /// Compute delta-1 array
             std::vector<UInt32> deltas(count);
@@ -274,8 +274,8 @@ MultiBlockTestData makeMultiBlockData(const std::vector<std::vector<uint32_t>> &
 
             /// TurboPFor encode
             uint8_t * encoded_end;
-            if (count == 128)
-                encoded_end = turbopfor::p4Enc128v32(deltas.data(), 128, packed_buffer);
+            if (count == TURBOPFOR_BLOCK_SIZE)
+                encoded_end = turbopfor::p4Enc128v32(deltas.data(), TURBOPFOR_BLOCK_SIZE, packed_buffer);
             else
                 encoded_end = turbopfor::p4Enc32(deltas.data(), count, packed_buffer);
 

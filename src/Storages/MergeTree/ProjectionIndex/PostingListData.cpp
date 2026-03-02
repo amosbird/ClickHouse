@@ -266,13 +266,13 @@ void PostingListWriter::add(UInt32 doc_id, Arena * arena, uint8_t * packed_buffe
             break;
         case 17:
             doc_delta_buffer
-                = reinterpret_cast<UInt32 *>(arena->alignedRealloc(reinterpret_cast<char *>(doc_delta_buffer), 16 * 4, 128 * 4, 16));
+                = reinterpret_cast<UInt32 *>(arena->alignedRealloc(reinterpret_cast<char *>(doc_delta_buffer), 16 * 4, TURBOPFOR_BLOCK_SIZE * 4, 16));
             break;
         default:
             break;
     }
 
-    UInt8 doc_buffer_up_to = (doc_count - 1) % 128;
+    UInt8 doc_buffer_up_to = (doc_count - 1) % TURBOPFOR_BLOCK_SIZE;
     UInt32 doc_delta = doc_id - last_doc_id - 1;
     doc_delta_buffer[doc_buffer_up_to] = doc_delta;
 
@@ -280,9 +280,9 @@ void PostingListWriter::add(UInt32 doc_id, Arena * arena, uint8_t * packed_buffe
     ++doc_buffer_up_to;
     ++doc_count;
 
-    if (doc_buffer_up_to == 128)
+    if (doc_buffer_up_to == TURBOPFOR_BLOCK_SIZE)
     {
-        uint8_t * packed_buffer_end = turbopfor::p4Enc128v32(doc_delta_buffer, 128, packed_buffer);
+        uint8_t * packed_buffer_end = turbopfor::p4Enc128v32(doc_delta_buffer, TURBOPFOR_BLOCK_SIZE, packed_buffer);
         UInt32 len = static_cast<UInt32>(packed_buffer_end - packed_buffer);
         chassert(len <= 512);
         auto * place = arena->alignedAlloc(len + sizeof(PostingListChunk), alignof(PostingListChunk));
@@ -307,7 +307,7 @@ public:
     {
         if (write_block_index)
         {
-            UInt32 packed_blocks_per_large_block = docs_per_large_block / 128;
+            UInt32 packed_blocks_per_large_block = docs_per_large_block / TURBOPFOR_BLOCK_SIZE;
             packed_block_last_doc_ids.reserve(packed_blocks_per_large_block);
             packed_block_offsets.reserve(packed_blocks_per_large_block);
         }
@@ -328,10 +328,10 @@ public:
         VarInt::writeVarUInt32(bytes, data_out);
         data_out.write(data, bytes);
 
-        /// Always count a packed block as 128 docs.
+        /// Always count a packed block as TURBOPFOR_BLOCK_SIZE docs.
         /// The tail block is the final one and will be flushed immediately,
         /// so treating it as full does not affect block layout.
-        docs_in_current_block += 128;
+        docs_in_current_block += TURBOPFOR_BLOCK_SIZE;
         current_block_last_doc_id = last_doc_id;
 
         if (docs_in_current_block >= docs_per_large_block)
@@ -436,9 +436,9 @@ void PostingListWriter::finish(
     ///   ...
     /// --------------------------------------------
 
-    /// Align posting_list_block_size up to 128 docs, so that each large block
-    /// consists of an integral number of packed-128 blocks.
-    const UInt32 docs_per_large_block = (static_cast<UInt32>(index_params.posting_list_block_size) + 127) & ~127;
+    /// Align posting_list_block_size up to TURBOPFOR_BLOCK_SIZE docs, so that each large block
+    /// consists of an integral number of packed blocks.
+    const UInt32 docs_per_large_block = (static_cast<UInt32>(index_params.posting_list_block_size) + TURBOPFOR_BLOCK_SIZE - 1) & ~(TURBOPFOR_BLOCK_SIZE - 1);
 
     /// The first document is stored inline, so only (doc_count - 1) documents
     /// are written into the large_posting stream.
@@ -453,7 +453,7 @@ void PostingListWriter::finish(
     LargePostingBlockWriter block_writer(wb, large_posting, docs_per_large_block,
         postingListFormatHasBlockIndex(resolvePostingListFormatVersion(index_params.posting_list_version)));
 
-    /// Iterate packed 128-doc chunks
+    /// Iterate packed TURBOPFOR_BLOCK_SIZE-doc chunks
     PostingListChunk * it = blocks_head;
     while (it != nullptr)
     {
@@ -461,8 +461,8 @@ void PostingListWriter::finish(
         it = it->next;
     }
 
-    /// Tail packed block (large_doc_count % 128)
-    UInt8 doc_buffer_up_to = large_doc_count % 128;
+    /// Tail packed block (large_doc_count % TURBOPFOR_BLOCK_SIZE)
+    UInt8 doc_buffer_up_to = large_doc_count % TURBOPFOR_BLOCK_SIZE;
     if (doc_buffer_up_to > 0)
     {
         uint8_t * packed_buffer_end = turbopfor::p4Enc32(doc_delta_buffer, doc_buffer_up_to, packed_buffer);
@@ -700,7 +700,7 @@ private:
         auto & data_buf = *stream->getDataBuffer();
         UInt32 bytes;
         VarInt::readVarUInt32(bytes, data_buf);
-        UInt32 count = std::min(remaining_count, 128U);
+        UInt32 count = std::min(remaining_count, static_cast<UInt32>(TURBOPFOR_BLOCK_SIZE));
         uint8_t * src_ptr;
         if (data_buf.available() >= bytes)
         {
@@ -714,8 +714,8 @@ private:
             src_ptr = stream->packed_buffer;
         }
 
-        if (count == 128)
-            turbopfor::p4D1Dec128v32(src_ptr, 128, doc_buffer, last_doc_id);
+        if (count == TURBOPFOR_BLOCK_SIZE)
+            turbopfor::p4D1Dec128v32(src_ptr, TURBOPFOR_BLOCK_SIZE, doc_buffer, last_doc_id);
         else
             turbopfor::p4D1Dec32(src_ptr, count, doc_buffer, last_doc_id);
 
@@ -898,7 +898,7 @@ void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStream
     chassert(num_large_blocks >= 1);
 
     UInt32 remaining_docs = doc_count - 1;
-    const UInt32 docs_per_large_block = (static_cast<UInt32>(index_params.posting_list_block_size) + 127) & ~127;
+    const UInt32 docs_per_large_block = (static_cast<UInt32>(index_params.posting_list_block_size) + TURBOPFOR_BLOCK_SIZE - 1) & ~(TURBOPFOR_BLOCK_SIZE - 1);
 
     LargePostingBlockMetas large_posting_blocks;
     large_posting_blocks.reserve(num_large_blocks);
@@ -987,8 +987,8 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
 
     UInt32 last_doc_id;
 
-    /// Align to 128-doc blocks
-    const UInt32 docs_per_large_block = (static_cast<UInt32>(index_params.posting_list_block_size) + 127) & ~127;
+    /// Align to TURBOPFOR_BLOCK_SIZE-doc blocks
+    const UInt32 docs_per_large_block = (static_cast<UInt32>(index_params.posting_list_block_size) + TURBOPFOR_BLOCK_SIZE - 1) & ~(TURBOPFOR_BLOCK_SIZE - 1);
     const UInt32 large_doc_count = doc_count - 1;
     const UInt32 num_large_blocks = (large_doc_count + docs_per_large_block - 1) / docs_per_large_block;
     LargePostingBlockWriter block_writer(wb, stream.plain_hashing, docs_per_large_block,
@@ -997,7 +997,7 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     UInt32 buffered = 0;
     auto flush128 = [&]()
     {
-        uint8_t * end = turbopfor::p4Enc128v32(doc_delta_buffer, 128, packed_buffer);
+        uint8_t * end = turbopfor::p4Enc128v32(doc_delta_buffer, TURBOPFOR_BLOCK_SIZE, packed_buffer);
         block_writer.addBlock(last_doc_id, reinterpret_cast<const char *>(packed_buffer), static_cast<UInt32>(end - packed_buffer));
         buffered = 0;
     };
@@ -1025,7 +1025,7 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
             chassert(doc_id > last_doc_id);
             doc_delta_buffer[buffered++] = doc_id - last_doc_id - 1;
             last_doc_id = doc_id;
-            if (buffered == 128)
+            if (buffered == TURBOPFOR_BLOCK_SIZE)
                 flush128();
         });
 

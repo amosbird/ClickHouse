@@ -5,6 +5,8 @@
 #include <base/types.h>
 #include <Common/PODArray.h>
 
+#include <Storages/MergeTree/ProjectionIndex/PostingListData.h>
+
 #include <limits>
 #include <memory>
 #include <unordered_set>
@@ -25,7 +27,7 @@ using LargePostingListReaderStreamPtr = std::shared_ptr<LargePostingListReaderSt
 /// Storage layout (two-level hierarchy):
 ///   Large blocks  — variable-size segments of the posting list, each stored as a
 ///                   contiguous region in the .lpst stream with its own Index Section.
-///   Packed blocks — fixed-size 128-element groups within a large block, delta-encoded
+///   Packed blocks — fixed-size TURBOPFOR_BLOCK_SIZE-element groups within a large block, delta-encoded
 ///                   and compressed with TurboPFor.  The last packed block in a large
 ///                   block may be shorter (the "tail block").
 ///
@@ -76,8 +78,6 @@ public:
     UInt32 cardinality() const;
 
 private:
-    static constexpr size_t TURBOPFOR_BLOCK_SIZE = 128;
-
     /// Load metadata for `large_block_idx`-th large block.
     /// For large postings: reads the Index Section from .lpst (packed block index),
     /// but does NOT decode any packed block data yet.
@@ -92,7 +92,7 @@ private:
     /// Returns false if target exceeds this large block's range.
     bool seekImpl(uint32_t target);
 
-    /// Decode the next packed block (128 doc_ids, or fewer for the tail block).
+    /// Decode the next packed block (TURBOPFOR_BLOCK_SIZE doc_ids, or fewer for the tail block).
     /// When `need_seek_before_decode` is set, seeks to the absolute stream offset
     /// from the packed block index before reading.  For large block 0's packed
     /// block 0, prepends `first_doc_id` which is stored separately in the dictionary.
@@ -105,7 +105,7 @@ private:
     const TokenPostingsInfo & info;
 
     /// Decoded doc_ids of the current packed block (large postings) or all doc_ids (embedded postings).
-    /// Fixed-size: 128 packed + 1 for first_doc_id prepend.  Embedded postings have at most 6 entries.
+    /// Fixed-size: TURBOPFOR_BLOCK_SIZE packed + 1 for first_doc_id prepend.  Embedded postings have at most 6 entries.
     alignas(16) uint32_t decoded_values[TURBOPFOR_BLOCK_SIZE + 1]{};
     size_t decoded_count = 0;              /// Number of valid entries in decoded_values.
     size_t index = 0;                      /// Read position within decoded_values.
@@ -113,7 +113,7 @@ private:
     /// Per-large-block packed block layout (recomputed in `prepare`).
     size_t block_count = 0;              /// Total packed blocks, including the tail block.
     size_t current_block = 0;            /// Index of the packed block being iterated.
-    size_t tail_size = 0;                /// Element count of the tail block (< 128), 0 if aligned.
+    size_t tail_size = 0;                /// Element count of the tail block (< TURBOPFOR_BLOCK_SIZE), 0 if aligned.
     UInt32 large_block_doc_count = 0;    /// Total doc count in the current large block.
     UInt32 last_decoded_doc_id = 0;      /// Last doc_id decoded (delta base for next block).
 
