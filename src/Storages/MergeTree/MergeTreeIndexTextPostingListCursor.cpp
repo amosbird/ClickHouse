@@ -315,11 +315,15 @@ bool PostingListCursor::seekImpl(uint32_t target)
 
     size_t j = static_cast<size_t>(it - packed_block_last_doc_ids.begin());
 
-    /// Seek to and decode the target packed block.
-    /// `need_seek_before_decode` tells `decodeNextBlock` to seek to the absolute offset.
-    current_block = j;
-    need_seek_before_decode = true;
-    decodeNextBlock();
+    /// If the target block is already decoded, search it directly without re-decoding.
+    /// This avoids redundant TurboPFor decode + stream seek when consecutive seeks
+    /// land in the same packed block (common in leapfrog intersection).
+    if (j != current_block || decoded_count == 0)
+    {
+        current_block = j;
+        need_seek_before_decode = true;
+        decodeNextBlock();
+    }
 
     /// Binary search within the decoded packed block.
     auto found_it = std::lower_bound(decoded_values, decoded_values + decoded_count, target);
