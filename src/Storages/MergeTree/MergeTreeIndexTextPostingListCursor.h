@@ -20,172 +20,139 @@ class IColumn;
 struct LargePostingListReaderStream;
 using LargePostingListReaderStreamPtr = std::shared_ptr<LargePostingListReaderStream>;
 
-/// A cursor for lazily iterating over a compressed posting list stored in
-/// ProjectionIndex V2 format (TurboPFor delta-encoded with per-large-block
-/// packed block index).
+/// Lazy cursor over a compressed posting list (sorted row IDs for a token).
 ///
-/// Posting list: a sorted list of row IDs where a token appears.
-/// This cursor decodes blocks on-demand, avoiding full decompression upfront.
-/// The V2 Index Session (loaded in `prepare`) enables O(log N) seek to any
-/// 128-doc packed block within a large block via binary search on `packed_block_last_doc_ids`
-/// and random seek using `packed_block_offsets`.
+/// Storage layout (two-level hierarchy):
+///   Large blocks  — variable-size segments of the posting list, each stored as a
+///                   contiguous region in the .lpst stream with its own Index Section.
+///   Packed blocks — fixed-size 128-element groups within a large block, delta-encoded
+///                   and compressed with TurboPFor.  The last packed block in a large
+///                   block may be shorter (the "tail block").
 ///
-/// Supports two access patterns:
-/// 1. Iterator-style: valid() / value() / next() / seek() - for skip-list intersection
-/// 2. Linear scan: linearOr() / linearAnd() - for brute-force bitmap operations
+/// Each large block's Index Section (read in `prepare`) stores two parallel arrays:
+///   `packed_block_last_doc_ids[j]` — last doc_id of packed block j
+///   `packed_block_offsets[j]`      — absolute byte offset of packed block j in .lpst
+/// These enable O(log N) seek via binary search + random file access.
 ///
-/// The posting list may span multiple large blocks. Use addLargeBlock()
-/// to register additional large blocks before iteration.
+/// Embedded postings (small cardinality tokens) are stored inline as a Roaring Bitmap
+/// in the dictionary stream and decoded entirely in `prepare`; no .lpst stream is used.
+///
+/// Two access patterns:
+///   1. Iterator: `valid` / `value` / `next` / `seek` — for leapfrog intersection.
+///   2. Linear scan: `linearOr` / `linearAnd` — for brute-force bitmap operations.
 class PostingListCursor
 {
 public:
-    /// Construct a cursor that owns an independent LargePostingListReaderStream.
-    /// Used in lazy apply mode to give each cursor its own stream, avoiding seek contention.
+    /// Construct a cursor with its own .lpst reader stream (large posting lists).
     PostingListCursor(LargePostingListReaderStreamPtr owned_stream_, const TokenPostingsInfo & info_);
 
-    /// Construct a cursor for embedded posting lists (no stream needed).
+    /// Construct a cursor without a stream (embedded posting lists only).
     PostingListCursor(const TokenPostingsInfo & info_);
 
-    /// Register an additional large block to iterate over.
-    void addLargeBlock(size_t);
-
-    /// Brute-force: set bits for all row IDs in range [row_offset, row_offset + num_rows).
+    /// Set bits in `data` for all doc_ids in [row_offset, row_offset + num_rows).
     void linearOr(UInt8 * data, size_t row_offset, size_t num_rows);
 
-    /// Brute-force: increment counts for all row IDs in range.
+    /// Increment counters in `data` for all doc_ids in [row_offset, row_offset + num_rows).
     void linearAnd(UInt8 * data, size_t row_offset, size_t num_rows);
 
-    /// Move to next row ID.
+    /// Move to the next doc_id.
     void next();
 
-    /// Returns true if cursor points to a valid row ID.
+    /// True if cursor points to a valid doc_id.
     bool valid() const { return is_valid; }
 
-    /// Returns current row ID. Requires valid() == true.
+    /// Current doc_id.  Undefined when `valid` returns false.
     uint32_t value() const { return current_values[index]; }
 
-    /// Advance to first row ID >= target.
+    /// Advance to the first doc_id >= target.
     void seek(uint32_t target);
 
-    /// Returns posting list density: count / (max - min + 1).
-    /// Used to decide between skip-list vs brute-force algorithm.
+    /// Posting list density: cardinality / (max_doc_id - min_doc_id + 1).
+    /// Used to choose between leapfrog and brute-force algorithms.
     double density() const { return density_val; }
 
-    /// Returns total cardinality of the posting list.
+    /// Total number of doc_ids in the posting list.
     /// Used to sort cursors by selectivity for leapfrog intersection.
     UInt32 cardinality() const;
 
 private:
     static constexpr size_t TURBOPFOR_BLOCK_SIZE = 128;
 
-    /// Load and prepare data for the given large block.
-    /// For large postings: loads the V2 Index Session (reads Index Section
-    /// from .lpst), but does NOT decode any packed block.
+    /// Load metadata for `large_block_idx`-th large block.
+    /// For large postings: reads the Index Section from .lpst (packed block index),
+    /// but does NOT decode any packed block data yet.
+    /// For embedded postings: decodes the entire Roaring Bitmap into `current_values`.
     void prepare(size_t large_block);
 
     void linearOrImpl(size_t large_block, UInt8 *, size_t row_begin, size_t row_end);
     void linearAndImpl(size_t large_block, UInt8 *, size_t row_begin, size_t row_end);
 
-    /// Seek to the first doc_id >= target within the current large block
-    /// using the V2 packed block index for O(log N) random access.
+    /// Seek to the first doc_id >= target within the current large block.
+    /// Uses binary search on `packed_block_last_doc_ids` for O(log N) access.
+    /// Returns false if target exceeds this large block's range.
     bool seekImpl(uint32_t target);
 
-    /// Decode the next 128-doc (or tail) packed block from the .lpst stream.
-    /// When `need_seek_before_decode` is set (after `prepare` or `seek`), seeks to
-    /// the absolute offset from the packed block index, computes the correct delta
-    /// base, and for the first large block's packed block 0, prepends `first_doc_id`.
-    /// Returns false if no more packed blocks remain in the current large block.
+    /// Decode the next packed block (128 doc_ids, or fewer for the tail block).
+    /// When `need_seek_before_decode` is set, seeks to the absolute stream offset
+    /// from the packed block index before reading.  For large block 0's packed
+    /// block 0, prepends `first_doc_id` which is stored separately in the dictionary.
+    /// Returns false when no more packed blocks remain in the current large block.
     bool decodeNextBlock();
 
-    LargePostingListReaderStream * stream = nullptr;
-    LargePostingListReaderStreamPtr owned_stream;
+    LargePostingListReaderStream * stream = nullptr;   /// Non-owning pointer (may alias owned_stream).
+    LargePostingListReaderStreamPtr owned_stream;      /// Owning handle; nullptr for embedded postings.
 
     const TokenPostingsInfo & info;
 
-    /// Decoded row IDs of current packed block
-    std::vector<uint32_t> current_values;
-    /// Position within current_values
-    size_t index = 0;
+    std::vector<uint32_t> current_values;  /// Decoded doc_ids of the current packed block.
+    size_t index = 0;                      /// Read position within current_values.
 
-    /// Number of 128-doc packed blocks in the current large block (including tail block)
-    size_t block_count = 0;
-    /// Current packed block being iterated
-    size_t current_block = 0;
-    /// Size of the tail packed block (< 128), or 0 if perfectly aligned
-    size_t tail_size = 0;
-    /// Total doc count in the current large block (block_doc_count from LargePostingBlockMeta)
-    UInt32 large_block_doc_count = 0;
-    /// Last decoded doc_id (for delta decoding continuity)
-    UInt32 last_decoded_doc_id = 0;
+    /// Per-large-block packed block layout (recomputed in `prepare`).
+    size_t block_count = 0;              /// Total packed blocks, including the tail block.
+    size_t current_block = 0;            /// Index of the packed block being iterated.
+    size_t tail_size = 0;                /// Element count of the tail block (< 128), 0 if aligned.
+    UInt32 large_block_doc_count = 0;    /// Total doc count in the current large block.
+    UInt32 last_decoded_doc_id = 0;      /// Last doc_id decoded (delta base for next block).
 
-    /// V2 Index section for the current large block: packed block level index
-    /// loaded in `prepare`, enables O(log N) seek within a large block.
-    /// `packed_block_last_doc_ids[j]` is the last doc_id of the j-th 128-doc packed block.
-    /// `packed_block_offsets[j]` is the absolute byte offset of the j-th packed block in .lpst.
-    std::vector<UInt32> packed_block_last_doc_ids;
-    std::vector<UInt64> packed_block_offsets;
+    /// Packed block index loaded from Index Section in `prepare`.
+    /// Enables O(log N) seek within a large block.
+    std::vector<UInt32> packed_block_last_doc_ids;  /// packed_block_last_doc_ids[j] = last doc_id of packed block j.
+    std::vector<UInt64> packed_block_offsets;        /// packed_block_offsets[j] = absolute byte offset in .lpst.
 
-    /// Large blocks this cursor covers (indexes into info.offsets / info.ranges)
-    size_t total_large_blocks = 0;
-    size_t current_large_block_idx = 0;
+    /// Large block iteration state.
+    size_t total_large_blocks = 0;             /// Number of large blocks for this token.
+    size_t current_large_block_idx = 0;        /// Index of the large block currently loaded.
     bool has_prepared_first_large_block = false;
 
     bool is_valid = true;
     bool is_embedded = false;
-    /// When true, decodeNextBlock will seek to the packed block offset before reading.
-    /// Set after prepare (Index Section read leaves stream at wrong position) and after
-    /// seekImpl (random jump). Cleared after the first seek so that sequential block
-    /// reads skip the redundant seek — the stream is already at the next block's start.
+
+    /// When true, `decodeNextBlock` seeks to the packed block offset before reading.
+    /// Set after `prepare` (Index Section read moves the stream position) and after
+    /// `seekImpl` (random jump).  Cleared after the first seek-based decode so that
+    /// sequential packed-block reads can proceed without redundant seeks.
     bool need_seek_before_decode = true;
+
     double density_val = 0;
 };
 
 using PostingListCursorPtr = std::shared_ptr<PostingListCursor>;
 using PostingListCursorMap = absl::flat_hash_map<std::string_view, PostingListCursorPtr>;
 
-/// Compute union (OR) of multiple posting lists using lazy decoding.
-///
-/// Used for TextSearchMode::Any - a row matches if it contains ANY of the search tokens.
-/// Iterates through each posting list and sets corresponding bits in the output column.
-///
-/// Note: brute_force_apply and density_threshold parameters are unused in union operation
-/// since linear scan is always used (no optimization benefit from skip-list for OR).
-///
-/// @param column         Output column (UInt8), sets bit to 1 for rows matching any token
-/// @param postings       Map from token to its posting list cursor
-/// @param search_tokens  List of tokens to search (determines iteration order)
-/// @param column_offset  Starting position in output column to write results
-/// @param row_offset     First row ID in the processing range
-/// @param num_rows       Number of rows to process
-/// @param brute_force_apply  Unused (kept for API consistency with intersection)
-/// @param density_threshold  Unused (kept for API consistency with intersection)
+/// Union (OR) of posting lists: set output[row] = 1 if the row appears in ANY posting list.
+/// Each cursor performs a linear scan over its doc_ids.
+/// `brute_force_apply` and `density_threshold` are unused (kept for API symmetry with intersection).
 void lazyUnionPostingLists(IColumn & column, const PostingListCursorMap & postings, const std::vector<String> & search_tokens, size_t column_offset, size_t row_offset, size_t num_rows, bool brute_force_apply, float density_threshold);
 
-/// Compute intersection (AND) of multiple posting lists using lazy decoding.
+/// Intersection (AND) of posting lists: set output[row] = 1 only if the row appears in ALL posting lists.
 ///
-/// Used for TextSearchMode::All - a row matches only if it contains ALL search tokens.
-/// Employs adaptive algorithm selection based on posting list density:
-///
-/// Algorithm selection:
-///   - Single list (n=1): direct linear scan, equivalent to union
-///   - Dense lists (density >= threshold) or brute_force_apply=true:
-///     Uses brute-force bitmap counting - each cursor marks its row IDs,
-///     then count rows where all cursors have set bits (sequential memory access)
-///   - Sparse lists: uses skip-list based leapfrog intersection -
-///     cursors advance together, only decode blocks as needed (fewer elements to process)
-///
-/// The density-based switching optimizes for different access patterns:
-///   - Sparse posting lists: skip-list is faster due to fewer elements
-///   - Dense posting lists: brute-force is faster due to sequential memory access
-///
-/// @param column         Output column (UInt8), sets bit to 1 for rows matching all tokens
-/// @param postings       Map from token to its posting list cursor
-/// @param search_tokens  List of tokens to search (determines which cursors to use)
-/// @param column_offset  Starting position in output column to write results
-/// @param row_offset     First row ID in the processing range
-/// @param num_rows       Number of rows to process
-/// @param brute_force_apply  Force brute-force algorithm regardless of density
-/// @param density_threshold  Switch to brute-force if average density >= this value
+/// Adaptive algorithm selection based on posting list density:
+///   - n == 1:  direct linear scan (degenerate case, same as union).
+///   - Dense (min density >= threshold) or `brute_force_apply`:
+///     Brute-force bitmap counting — first cursor sets bits, remaining cursors increment counters,
+///     then a final pass keeps only rows where count == n.  Favors sequential memory access.
+///   - Sparse:  leapfrog intersection — cursors sorted by ascending cardinality, the sparsest
+///     cursor leads and others seek forward.  Favors skipping large unused ranges.
 void lazyIntersectPostingLists(IColumn & column, const PostingListCursorMap & postings, const std::vector<String> & search_tokens, size_t column_offset, size_t row_offset, size_t num_rows, bool brute_force_apply, float density_threshold);
 
 }

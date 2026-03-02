@@ -6,7 +6,6 @@
 #include <algorithm>
 
 #include <turbopfor.h>
-#pragma clang optimize off
 namespace DB
 {
 
@@ -18,16 +17,15 @@ namespace ErrorCodes
 namespace
 {
 
-/// Prefix-Based Variable-Length Integer Decoding.
-/// This mirrors the encoding used in PostingListData.cpp (VarInt namespace).
+/// Prefix-based variable-length integer decoding (mirrors PostingListData.cpp VarInt encoding).
 /// Used for reading compressed block sizes and Index Section fields in .lpst files.
 ///
-/// Encoding thresholds:
-/// - [0 - 176]        : 1 byte
-/// - [177 - 16560]    : 2 bytes
-/// - [16561 - 540848] : 3 bytes
-/// - [540849 - 2^24-1]: 4 bytes (Marker 249)
-/// - [Up to 2^32-1]   : 5 bytes (Marker 250)
+/// Encoding scheme (first byte determines length):
+///   [0, 176]     → 1 byte   (value = first byte)
+///   [177, 240]   → 2 bytes  (value up to 16560)
+///   [241, 248]   → 3 bytes  (value up to 540848)
+///   249          → 4 bytes  (value up to 2^24 - 1)
+///   250          → 5 bytes  (value up to 2^32 - 1)
 inline void readPrefixVarUInt32(UInt32 & x, ReadBuffer & istr)
 {
     static constexpr UInt32 ONE_BYTE_MAX = 176;
@@ -118,16 +116,15 @@ void PostingListCursor::prepare(size_t large_block_idx)
 {
     has_prepared_first_large_block = true;
 
-    /// Large block 0's packed block 0 needs to prepend `first_doc_id` (which is stored
-    /// separately in the dictionary stream and not included in TurboPFor encoding), so
-    /// reserve one extra slot to avoid reallocation during decodeNextBlock.
+    /// Large block 0, packed block 0 needs an extra slot for `first_doc_id`
+    /// (stored in the dictionary, not in TurboPFor data).
     current_values.reserve(TURBOPFOR_BLOCK_SIZE + (large_block_idx == 0 ? 1 : 0));
     current_values.clear();
 
     if (info.embedded_postings)
     {
-        /// Embedded postings: already stored as a Roaring Bitmap.
-        /// Decode all doc IDs into current_values at once.
+        /// Embedded posting list: already materialized as a Roaring Bitmap.
+        /// Decode all doc_ids into current_values in one shot.
         chassert(!stream);
         current_values.resize(info.embedded_postings->cardinality());
         info.embedded_postings->toUint32Array(current_values.data());
@@ -144,8 +141,8 @@ void PostingListCursor::prepare(size_t large_block_idx)
         return;
     }
 
-    /// Large posting list: read from LargePostingListReaderStream using TurboPFor encoding.
-    /// Each large block corresponds to one LargePostingBlockMeta.
+    /// Large posting list: read from .lpst stream, TurboPFor delta-encoded.
+    /// Each large block has a corresponding `LargePostingBlockMeta`.
     chassert(stream);
     chassert(large_block_idx < info.offsets.size());
     chassert(large_block_idx < info.ranges.size());
@@ -153,7 +150,7 @@ void PostingListCursor::prepare(size_t large_block_idx)
     const auto & block_meta = info.offsets[large_block_idx];
     large_block_doc_count = block_meta.block_doc_count;
 
-    /// Compute packed block structure for the delta-encoded portion
+    /// Compute packed block structure from the total doc count.
     size_t full_blocks = large_block_doc_count / TURBOPFOR_BLOCK_SIZE;
     tail_size = large_block_doc_count % TURBOPFOR_BLOCK_SIZE;
     block_count = full_blocks + (tail_size > 0 ? 1 : 0);
@@ -162,18 +159,17 @@ void PostingListCursor::prepare(size_t large_block_idx)
     current_large_block_idx = large_block_idx;
     need_seek_before_decode = true;
 
-    /// Compute density
+    /// Density = doc_count / row_id_span.  Used for algorithm selection.
     const auto & range = info.ranges[large_block_idx];
     UInt32 range_span = static_cast<UInt32>(range.end) - static_cast<UInt32>(range.begin) + 1;
     density_val = (range_span > 0) ? static_cast<double>(large_block_doc_count + (large_block_idx == 0 ? 1 : 0)) / static_cast<double>(range_span) : 1.0;
 
-    /// In V2 format, block_meta.index_offset points to the Index Section.
-    /// Seek there and read the packed block index.
+    /// Seek to the Index Section and read the packed block index.
     chassert(block_meta.index_offset != 0);
     stream->seek(block_meta.index_offset);
     auto & data_buf = *stream->getDataBuffer();
 
-    /// Read Index Section: [num_packed_blocks] [last_doc_ids...] [offsets...]
+    /// Index Section layout: [num_packed_blocks] [last_doc_ids...] [offsets...]
     UInt32 num_packed_blocks;
     readPrefixVarUInt32(num_packed_blocks, data_buf);
     chassert(num_packed_blocks == block_count);
@@ -207,7 +203,9 @@ bool PostingListCursor::decodeNextBlock()
         need_seek_before_decode = false;
     }
 
-    /// Compute delta base for the target packed block.
+    /// Compute the delta base for TurboPFor decoding.
+    /// Block 0 of each large block uses the large block's range.begin as base;
+    /// subsequent blocks use the last doc_id of the previous packed block.
     if (current_block == 0)
     {
         last_decoded_doc_id = static_cast<UInt32>(info.ranges[current_large_block_idx].begin);
@@ -219,7 +217,7 @@ bool PostingListCursor::decodeNextBlock()
 
     auto &data_buf = *stream->getDataBuffer();
 
-    /// Read compressed bytes length (Prefix VarInt encoded in .lpst)
+    /// Read the compressed payload length (prefix-varint encoded).
     UInt32 bytes;
     readPrefixVarUInt32(bytes, data_buf);
 
@@ -238,10 +236,9 @@ bool PostingListCursor::decodeNextBlock()
         src_ptr = stream->packed_buffer;
     }
 
-    /// `first_doc_id` is stored separately in the dictionary stream and is NOT included
-    /// in the TurboPFor-encoded packed blocks. For large block 0's packed block 0, we need
-    /// to prepend it manually: resize to `count + 1`, decode into offset 1, then fill slot 0.
-    /// This mirrors the old `ReaderStreamCursor` logic with `include_first_doc = true`.
+    /// `first_doc_id` is stored in the dictionary stream and excluded from TurboPFor encoding.
+    /// For large block 0, packed block 0: allocate an extra slot, decode into offset 1,
+    /// then write `first_doc_id` into slot 0.
     bool prepend_first_doc_id = (current_large_block_idx == 0 && current_block == 0);
     UInt32 actual_count = prepend_first_doc_id ? count + 1 : count;
 
@@ -264,13 +261,12 @@ bool PostingListCursor::decodeNextBlock()
 
 void PostingListCursor::seek(uint32_t target)
 {
-    /// Fast path: try current already-prepared large block first.
+    /// Fast path: target may fall within the currently loaded large block.
     if (!is_embedded && seekImpl(target))
         return;
 
-    /// Slow path: current large block doesn't contain target.
-    /// Start from next large block (current one already failed in fast path).
-    /// For embedded postings, seekImpl above was skipped, so start from current_large_block_idx.
+    /// Slow path: scan subsequent large blocks whose range covers the target.
+    /// For embedded postings, `seekImpl` was skipped above, so start from current index.
     bool found = false;
     size_t start = is_embedded ? current_large_block_idx : current_large_block_idx + 1;
     for (size_t i = start; i < total_large_blocks; ++i)
@@ -294,7 +290,7 @@ bool PostingListCursor::seekImpl(uint32_t target)
 {
     if (is_embedded)
     {
-        /// Embedded: all values in current_values, simple binary search
+        /// Embedded: all doc_ids are in current_values, use binary search.
         auto it = std::lower_bound(current_values.begin(), current_values.end(), target);
         if (it != current_values.end())
         {
@@ -304,8 +300,7 @@ bool PostingListCursor::seekImpl(uint32_t target)
         return false;
     }
 
-    /// Use packed block index for O(log N) random access within the large block.
-    /// First check if target is in the current decoded block
+    /// Check if target falls within the already-decoded packed block.
     if (index < current_values.size())
     {
         auto it = std::lower_bound(current_values.begin() + index, current_values.end(), target);
@@ -316,21 +311,21 @@ bool PostingListCursor::seekImpl(uint32_t target)
         }
     }
 
-    /// Binary search on packed_block_last_doc_ids to find the target packed block.
-    /// Find the first j where last_doc_ids[j] >= target.
+    /// Binary search on packed_block_last_doc_ids: find the first packed block
+    /// whose last doc_id >= target.
     auto it = std::lower_bound(packed_block_last_doc_ids.begin(), packed_block_last_doc_ids.end(), target);
     if (it == packed_block_last_doc_ids.end())
         return false;
 
     size_t j = static_cast<size_t>(it - packed_block_last_doc_ids.begin());
 
-    /// Random seek to the target packed block via `need_seek_before_decode`.
-    /// Delta base and first_doc_id prepend are handled inside `decodeNextBlock`.
+    /// Seek to and decode the target packed block.
+    /// `need_seek_before_decode` tells `decodeNextBlock` to seek to the absolute offset.
     current_block = j;
     need_seek_before_decode = true;
     decodeNextBlock();
 
-    /// Search within the decoded block
+    /// Binary search within the decoded packed block.
     auto found_it = std::lower_bound(current_values.begin(), current_values.end(), target);
     if (found_it != current_values.end())
     {
@@ -353,13 +348,12 @@ void PostingListCursor::next()
         ++current_block;
         if (current_block < block_count)
         {
-            /// Still within current large block, decode next packed block.
-            /// Sequential read: need_seek_before_decode stays false.
+            /// More packed blocks in this large block — decode sequentially.
             decodeNextBlock();
             return;
         }
 
-        /// All packed blocks in current large block exhausted, advance to next large block.
+        /// Current large block exhausted — advance to next one.
         size_t next_large_block = current_large_block_idx + 1;
         if (next_large_block >= total_large_blocks)
         {
@@ -372,6 +366,8 @@ void PostingListCursor::next()
     }
 }
 
+/// Scatter-write 1s into `out` for doc_ids in current_values[begin..length).
+/// 4-wide loop with prefetch for cache-line utilization.
 inline void padColumnForOr(UInt8 * __restrict out, const std::vector<uint32_t> & current_values, size_t row_begin, size_t begin, size_t length)
 {
     const uint32_t * data = current_values.data();
@@ -423,7 +419,7 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
         return;
     }
 
-    /// Process the current already-decoded block, then decode subsequent blocks sequentially.
+    /// Process the current packed block, then decode and process subsequent blocks.
     for (size_t blk = current_block; blk < block_count; ++blk)
     {
         current_block = blk;
@@ -433,12 +429,10 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
         if (current_values.empty())
             continue;
 
-        /// Skip blocks entirely before row_begin
-        if (current_values.back() < row_begin)
+        if (current_values.back() < row_begin)  /// Entire block before range — skip.
             continue;
 
-        /// Skip blocks entirely after row_end
-        if (current_values.front() > row_end)
+        if (current_values.front() > row_end)   /// Entire block after range — done.
             return;
 
         auto it = std::lower_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_begin));
@@ -475,6 +469,8 @@ void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_row
     }
 }
 
+/// Scatter-increment counters in `out` for doc_ids in current_values[begin..length).
+/// 4-wide loop with prefetch for cache-line utilization.
 inline void padColumnForAnd(UInt8 * __restrict out, const std::vector<uint32_t> & current_values, size_t row_begin, size_t begin, size_t length)
 {
     const uint32_t *p = current_values.data() + begin;
@@ -573,7 +569,7 @@ void PostingListCursor::linearAnd(UInt8 * data, size_t row_offset, size_t num_ro
 namespace
 {
 
-/// Helper struct for min-heap based intersection algorithm.
+/// Element for the min-heap used in N-way intersection.
 struct HeapItem
 {
     uint32_t val = 0;
@@ -584,7 +580,7 @@ struct HeapItem
     bool operator>(const HeapItem & other) const { return val > other.val; }
 };
 
-/// Two-way merge intersection using skip-list style seek.
+/// Two-cursor intersection.  The lagging cursor seeks to the leading cursor's doc_id.
 void intersectTwo(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1, size_t row_offset, size_t effective_end)
 {
     while (c0->valid() && c1->valid())
@@ -611,7 +607,7 @@ void intersectTwo(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1,
     }
 }
 
-/// Three-way merge intersection.
+/// Three-cursor intersection.  All cursors behind the maximum seek forward.
 void intersectThree(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1, PostingListCursorPtr c2, size_t row_offset, size_t effective_end)
 {
     uint32_t v0 = 0;
@@ -648,7 +644,7 @@ void intersectThree(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c
     }
 }
 
-/// Four-way merge intersection.
+/// Four-cursor intersection.
 void intersectFour(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1, PostingListCursorPtr c2, PostingListCursorPtr c3, size_t row_offset, size_t effective_end)
 {
     uint32_t v0 = 0;
@@ -689,7 +685,8 @@ void intersectFour(UInt8 * out, PostingListCursorPtr c0, PostingListCursorPtr c1
     }
 }
 
-/// Leapfrog intersection with linear min/max scan.
+/// N-way leapfrog intersection (N <= 8).
+/// Uses a linear scan over cursor values to find min/max each round.
 void intersectLeapfrogLinear(UInt8 * out, const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t effective_end)
 {
     const size_t n = cursors.size();
@@ -742,7 +739,8 @@ void intersectLeapfrogLinear(UInt8 * out, const std::vector<PostingListCursorPtr
     }
 }
 
-/// Leapfrog intersection using min-heap.
+/// N-way leapfrog intersection (N > 8).
+/// Uses a min-heap to efficiently extract the minimum cursor each round.
 void intersectLeapfrogHeap(UInt8 * out, const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t effective_end)
 {
     const size_t n = cursors.size();
@@ -809,7 +807,9 @@ void intersectLeapfrogHeap(UInt8 * out, const std::vector<PostingListCursorPtr> 
     }
 }
 
-/// Dispatcher for skip-list based intersection algorithms.
+/// Dispatch to the best leapfrog variant based on cursor count:
+///   2 → unrolled two-cursor,  3 → three-cursor,  4 → four-cursor,
+///   5..8 → linear scan,  >8 → min-heap.
 void intersectLeapfrog(UInt8 * out, const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t effective_end)
 {
     if (cursors.size() == 2)
@@ -839,7 +839,9 @@ void intersectLeapfrog(UInt8 * out, const std::vector<PostingListCursorPtr> & cu
     intersectLeapfrogHeap(out, cursors, row_offset, effective_end);
 }
 
-/// Brute-force intersection using bitmap counting.
+/// Brute-force intersection via bitmap counting.
+/// First cursor sets bits (linearOr), remaining cursors increment counters (linearAnd),
+/// then a final pass converts count == n into 1, everything else into 0.
 void intersectBruteForce(UInt8 * out, const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t num_rows)
 {
     cursors[0]->linearOr(out, row_offset, num_rows);
@@ -918,9 +920,9 @@ void lazyIntersectPostingLists(IColumn & column, const PostingListCursorMap & po
         return;
     }
 
-    /// Use min density for algorithm selection: brute-force is only beneficial
-    /// when ALL cursors are dense. If any cursor is sparse, leapfrog can skip
-    /// large ranges efficiently, making it the better choice.
+    /// Algorithm selection uses the MINIMUM density across all cursors:
+    /// brute-force only wins when ALL lists are dense.  A single sparse cursor
+    /// makes leapfrog more efficient because it can skip large unused ranges.
     double min_density = std::numeric_limits<double>::max();
     for (size_t i = 0; i < n; ++i)
         min_density = std::min(min_density, cursors[i]->density());
@@ -931,9 +933,9 @@ void lazyIntersectPostingLists(IColumn & column, const PostingListCursorMap & po
         return;
     }
 
-    /// Sort cursors by cardinality ascending so the sparsest cursor leads
-    /// the leapfrog loop. This minimizes total seek count: the sparse leader
-    /// advances in large jumps while dense followers catch up cheaply.
+    /// Sort cursors by ascending cardinality so the sparsest cursor leads
+    /// the leapfrog.  The sparse leader advances in large jumps while dense
+    /// followers catch up cheaply via seek.
     std::sort(cursors.begin(), cursors.end(),
         [](const PostingListCursorPtr & a, const PostingListCursorPtr & b)
         { return a->cardinality() < b->cardinality(); });

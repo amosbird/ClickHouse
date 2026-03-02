@@ -2234,3 +2234,693 @@ TEST(PostingListCursorTest, MultiBlockCardinality)
 
     EXPECT_EQ(cursor->cardinality(), 350u);
 }
+
+
+// ===========================================================================================
+// Section 39: Multi-block — seek to middle packed block, then next() across large block boundary
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockSeekToMiddlePackedBlockThenDrainAcrossLargeBlock)
+{
+    /// Block 0: 400 docs (0..399) → first_doc_id + 399 encoded → 3 full packed blocks + tail.
+    /// Block 1: 200 docs (1000..1199).
+    /// Seek to doc 200 (middle of packed block 1), then next() all the way through
+    /// block 0 and across into block 1.
+    std::vector<uint32_t> block0 = generateRange(0, 400);
+    std::vector<uint32_t> block1 = generateRange(1000, 200);
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    cursor->seek(200);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 200u);
+
+    /// Drain the rest and verify
+    std::vector<uint32_t> result;
+    while (cursor->valid())
+    {
+        result.push_back(cursor->value());
+        cursor->next();
+    }
+
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 200; d < 400; ++d)
+        expected.push_back(d);
+    for (uint32_t d = 1000; d < 1200; ++d)
+        expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+
+// ===========================================================================================
+// Section 40: Multi-block — seek on sparse doc IDs (gap values)
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockSparseSeekToGapValue)
+{
+    /// Sparse docs: 0,3,6,...,447 in block 0; 1000,1005,...,1745 in block 1.
+    /// Seek to values that fall in gaps between actual doc IDs.
+    std::vector<uint32_t> block0 = generateRange(0, 150, 3);  // 0,3,6,...,447
+    std::vector<uint32_t> block1 = generateRange(1000, 150, 5); // 1000,1005,...,1745
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Seek to 4 (between 3 and 6) → should land on 6
+    cursor->seek(4);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 6u);
+
+    /// Seek to 100 (between 99 and 102) → should land on 102
+    cursor->seek(100);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 102u);
+
+    /// Seek to 500 (in gap between blocks) → should land on 1000
+    cursor->seek(500);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 1000u);
+
+    /// Seek to 1001 (between 1000 and 1005) → should land on 1005
+    cursor->seek(1001);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 1005u);
+
+    /// Seek to 1746 (beyond last doc) → invalid
+    cursor->seek(1746);
+    EXPECT_FALSE(cursor->valid());
+}
+
+TEST(PostingListCursorTest, MultiBlockSparseSeekToFirstDocOfEachBlock)
+{
+    std::vector<uint32_t> block0 = generateRange(10, 150, 3);  // 10,13,...,457
+    std::vector<uint32_t> block1 = generateRange(1000, 150, 5); // 1000,1005,...,1745
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Seek to exact first doc of block 0
+    cursor->seek(10);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 10u);
+
+    /// Seek to exact first doc of block 1
+    cursor->seek(1000);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 1000u);
+}
+
+
+// ===========================================================================================
+// Section 41: Multi-block — linearOr/linearAnd when range misses all large blocks
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockLinearOrRangeBeforeAllBlocks)
+{
+    /// Block 0: 500..649, Block 1: 1000..1149
+    /// Range [0, 100) is entirely before block 0.
+    std::vector<uint32_t> block0 = generateRange(500, 150);
+    std::vector<uint32_t> block1 = generateRange(1000, 150);
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 0, 100);
+    EXPECT_TRUE(result.empty());
+}
+
+TEST(PostingListCursorTest, MultiBlockLinearOrRangeAfterAllBlocks)
+{
+    /// Block 0: 0..149, Block 1: 500..699
+    /// Range [2000, 100) is entirely after all blocks.
+    std::vector<uint32_t> block0 = generateRange(0, 150);
+    std::vector<uint32_t> block1 = generateRange(500, 200);
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 2000, 100);
+    EXPECT_TRUE(result.empty());
+}
+
+TEST(PostingListCursorTest, MultiBlockLinearOrRangeInGapBetweenBlocks)
+{
+    /// Block 0: 0..149, Block 1: 500..699
+    /// Range [200, 200) = [200, 400) is in the gap.
+    std::vector<uint32_t> block0 = generateRange(0, 150);
+    std::vector<uint32_t> block1 = generateRange(500, 200);
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 200, 200);
+    EXPECT_TRUE(result.empty());
+}
+
+TEST(PostingListCursorTest, MultiBlockLinearAndRangeBeforeAllBlocks)
+{
+    std::vector<uint32_t> block0 = generateRange(500, 150);
+    std::vector<uint32_t> block1 = generateRange(1000, 150);
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    std::vector<UInt8> buf(100, 1);
+    cursor->linearAnd(buf.data(), 0, 100);
+
+    /// All values should remain 1 (no increments)
+    for (size_t i = 0; i < 100; ++i)
+        EXPECT_EQ(buf[i], 1u) << "Unexpected increment at offset " << i;
+}
+
+
+// ===========================================================================================
+// Section 42: Multi-block — density computation verification
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockDensityPerfectlyDenseBlock0)
+{
+    /// Block 0: consecutive docs 0..199 → 200 total docs.
+    /// large_block_doc_count = 199 (first_doc_id excluded from count).
+    /// range = (0, 199), range_span = 200.
+    /// density = (199 + 1) / 200 = 1.0
+    std::vector<uint32_t> docs = generateRange(0, 200);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    EXPECT_DOUBLE_EQ(cursor->density(), 1.0);
+}
+
+TEST(PostingListCursorTest, MultiBlockDensitySparseBlock0)
+{
+    /// Block 0: sparse docs 0,3,6,...,447 → 150 docs total.
+    /// large_block_doc_count = 149.
+    /// range = (0, 447), range_span = 448.
+    /// density = (149 + 1) / 448 = 150/448
+    std::vector<uint32_t> docs = generateRange(0, 150, 3);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    double expected_density = 150.0 / 448.0;
+    EXPECT_NEAR(cursor->density(), expected_density, 1e-6);
+}
+
+TEST(PostingListCursorTest, MultiBlockDensityAfterSeekToSecondLargeBlock)
+{
+    /// Block 0: 0..199 (dense).
+    /// Block 1: 500,502,504,...,698 → 100 docs, step 2.
+    /// After seek to block 1: large_block_doc_count = 100, range = (500,698), span = 199.
+    /// density = 100 / 199
+    std::vector<uint32_t> block0 = generateRange(0, 200);
+    std::vector<uint32_t> block1 = generateRange(500, 100, 2); // 500,502,...,698
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// After construction, density reflects block 0 = 1.0
+    EXPECT_DOUBLE_EQ(cursor->density(), 1.0);
+
+    /// Seek to block 1 triggers prepare(1), which updates density
+    cursor->seek(500);
+    ASSERT_TRUE(cursor->valid());
+    double expected_density = 100.0 / 199.0;
+    EXPECT_NEAR(cursor->density(), expected_density, 1e-6);
+}
+
+
+// ===========================================================================================
+// Section 43: Multi-block — 3-way and 4-way intersection with multi-block cursors
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockIntersectThreeMultiBlockCursors)
+{
+    /// Cursor A: [0..199], [500..699]
+    /// Cursor B: [50..249], [550..749]
+    /// Cursor C: [100..299], [600..799]
+    /// Intersection: [100..199] ∪ [600..699]
+    auto dataA = makeMultiBlockData({generateRange(0, 200), generateRange(500, 200)});
+    auto dataB = makeMultiBlockData({generateRange(50, 200), generateRange(550, 200)});
+    auto dataC = makeMultiBlockData({generateRange(100, 200), generateRange(600, 200)});
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeMultiBlockCursor(dataB);
+    postings["c"] = makeMultiBlockCursor(dataC);
+
+    auto result = intersectAndCollect(postings, {"a", "b", "c"}, 0, 800, false, 100.0);
+
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 100; d < 200; ++d) expected.push_back(d);
+    for (uint32_t d = 600; d < 700; ++d) expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, MultiBlockIntersectFourMultiBlockCursors)
+{
+    /// Cursor A: [0..199]
+    /// Cursor B: [50..249]
+    /// Cursor C: [100..299]
+    /// Cursor D: [150..349]
+    /// Intersection: [150..199]
+    auto dataA = makeMultiBlockData({generateRange(0, 200)});
+    auto dataB = makeMultiBlockData({generateRange(50, 200)});
+    auto dataC = makeMultiBlockData({generateRange(100, 200)});
+    auto dataD = makeMultiBlockData({generateRange(150, 200)});
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeMultiBlockCursor(dataB);
+    postings["c"] = makeMultiBlockCursor(dataC);
+    postings["d"] = makeMultiBlockCursor(dataD);
+
+    auto result = intersectAndCollect(postings, {"a", "b", "c", "d"}, 0, 400, false, 100.0);
+
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 150; d < 200; ++d) expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, MultiBlockIntersectFiveMultiBlockLeapfrogLinear)
+{
+    /// 5 cursors → dispatches to intersectLeapfrogLinear.
+    /// All share [100..149].
+    auto dataA = makeMultiBlockData({generateRange(0, 200)});
+    auto dataB = makeMultiBlockData({generateRange(50, 200)});
+    auto dataC = makeMultiBlockData({generateRange(100, 200)});
+    auto dataD = makeMultiBlockData({generateRange(100, 150)});
+    auto dataE = makeMultiBlockData({generateRange(100, 130)});
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeMultiBlockCursor(dataB);
+    postings["c"] = makeMultiBlockCursor(dataC);
+    postings["d"] = makeMultiBlockCursor(dataD);
+    postings["e"] = makeMultiBlockCursor(dataE);
+
+    auto result = intersectAndCollect(postings, {"a", "b", "c", "d", "e"}, 0, 400, false, 100.0);
+
+    /// Intersection is [100..229] ∩ each cursor. Cursor E is [100..229] (130 docs).
+    /// Cursor D is [100..249]. Cursor C is [100..299]. Cursor B is [50..249]. Cursor A is [0..199].
+    /// So intersection = [100..199] ∩ [100..229] = [100..199]
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 100; d < 200; ++d) expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, MultiBlockIntersectThreeDisjoint)
+{
+    auto dataA = makeMultiBlockData({generateRange(0, 150)});
+    auto dataB = makeMultiBlockData({generateRange(200, 150)});
+    auto dataC = makeMultiBlockData({generateRange(400, 150)});
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeMultiBlockCursor(dataB);
+    postings["c"] = makeMultiBlockCursor(dataC);
+
+    auto result = intersectAndCollect(postings, {"a", "b", "c"}, 0, 600, false, 100.0);
+    EXPECT_TRUE(result.empty());
+}
+
+
+// ===========================================================================================
+// Section 44: Multi-block — seek to first_doc_id with non-zero start
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockSeekToFirstDocIdNonZero)
+{
+    /// first_doc_id = 1000 (ranges[0].begin), stored separately.
+    /// Seek to exactly 1000 should find it via the prepend_first_doc_id logic.
+    std::vector<uint32_t> docs = generateRange(1000, 200); // 1000..1199
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    cursor->seek(1000);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 1000u);
+
+    cursor->next();
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 1001u);
+}
+
+TEST(PostingListCursorTest, MultiBlockSeekBeforeFirstDocIdNonZero)
+{
+    /// first_doc_id = 500. Seek to 400 (before range) should land on 500.
+    std::vector<uint32_t> docs = generateRange(500, 200); // 500..699
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    cursor->seek(400);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 500u);
+}
+
+TEST(PostingListCursorTest, MultiBlockDrainFromFirstDocIdNonZero)
+{
+    /// Verify all docs including first_doc_id are returned when draining.
+    std::vector<uint32_t> docs = generateRange(5000, 300); // 5000..5299
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = seekAndDrainCursor(cursor, 5000);
+    EXPECT_EQ(result, docs);
+}
+
+
+// ===========================================================================================
+// Section 45: Multi-block — need_seek_before_decode state transitions
+//   Seek sets need_seek=true, decodeNextBlock clears it, subsequent next()
+//   should do sequential reads (no redundant seek).
+//   We verify indirectly: seek to a packed block, then next() through
+//   the remaining packed blocks and into the next large block.
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockSeekThenSequentialNextThroughMultiplePackedBlocks)
+{
+    /// 500 docs in block 0 → first_doc_id + 499 encoded → 3 full blocks + tail.
+    /// 200 docs in block 1.
+    /// Seek to doc 200 (packed block 1), then next() all the way.
+    std::vector<uint32_t> block0 = generateRange(0, 500);
+    std::vector<uint32_t> block1 = generateRange(1000, 200);
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    cursor->seek(200);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 200u);
+
+    /// Walk through remaining packed blocks in block 0
+    uint32_t prev = 200;
+    while (cursor->valid() && cursor->value() < 500)
+    {
+        EXPECT_GE(cursor->value(), prev);
+        prev = cursor->value();
+        cursor->next();
+    }
+
+    /// Should now be at block 1
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 1000u);
+
+    /// Walk through block 1
+    prev = 1000;
+    while (cursor->valid())
+    {
+        EXPECT_GE(cursor->value(), prev);
+        prev = cursor->value();
+        cursor->next();
+    }
+    EXPECT_EQ(prev, 1199u);
+}
+
+
+// ===========================================================================================
+// Section 46: Multi-block — single doc in block (doc_count == 1 equivalent)
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockMinimalBlock)
+{
+    /// Block 0 with only 2 docs: first_doc_id + 1 encoded doc.
+    /// This is the minimum for the large block path (1 doc would be embedded).
+    std::vector<uint32_t> docs = {100, 200};
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = seekAndDrainCursor(cursor, 100);
+    EXPECT_EQ(result, docs);
+}
+
+
+// ===========================================================================================
+// Section 47: Multi-block — many large blocks (10+) seek stress test
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockTenLargeBlocksSeekStress)
+{
+    /// 10 large blocks, each 130 docs, spaced 500 apart.
+    std::vector<std::vector<uint32_t>> blocks;
+    for (int i = 0; i < 10; ++i)
+        blocks.push_back(generateRange(static_cast<uint32_t>(i * 500), 130));
+
+    auto data = makeMultiBlockData(blocks);
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Forward seek to every block's last doc
+    for (int i = 0; i < 10; ++i)
+    {
+        uint32_t last_doc = static_cast<uint32_t>(i * 500 + 129);
+        cursor->seek(last_doc);
+        ASSERT_TRUE(cursor->valid()) << "Block " << i << " last doc seek failed";
+        EXPECT_EQ(cursor->value(), last_doc) << "Block " << i;
+    }
+
+    /// Seek beyond all
+    cursor->seek(5000);
+    EXPECT_FALSE(cursor->valid());
+}
+
+TEST(PostingListCursorTest, MultiBlockTenLargeBlocksFullDrain)
+{
+    std::vector<std::vector<uint32_t>> blocks;
+    for (int i = 0; i < 10; ++i)
+        blocks.push_back(generateRange(static_cast<uint32_t>(i * 500), 130));
+
+    auto data = makeMultiBlockData(blocks);
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = seekAndDrainCursor(cursor, data.all_docs.front());
+    EXPECT_EQ(result, data.all_docs);
+}
+
+TEST(PostingListCursorTest, MultiBlockTwentyLargeBlocksSeekSkip)
+{
+    /// 20 blocks — seek to every other block to test skipping.
+    std::vector<std::vector<uint32_t>> blocks;
+    for (int i = 0; i < 20; ++i)
+        blocks.push_back(generateRange(static_cast<uint32_t>(i * 300), 130));
+
+    auto data = makeMultiBlockData(blocks);
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Seek to every even-numbered block
+    for (int i = 0; i < 20; i += 2)
+    {
+        uint32_t target = static_cast<uint32_t>(i * 300 + 50);
+        cursor->seek(target);
+        ASSERT_TRUE(cursor->valid()) << "Block " << i;
+        EXPECT_EQ(cursor->value(), target) << "Block " << i;
+    }
+}
+
+
+// ===========================================================================================
+// Section 48: Multi-block + Embedded mixed — brute-force path
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockWithEmbeddedBruteForceIntersect)
+{
+    /// Multi-block cursor A: [0..199], [500..699]
+    /// Embedded cursor B: all even numbers 0,2,4,...,698
+    /// Brute-force intersection: even numbers in [0..199] ∪ even numbers in [500..699]
+    auto dataA = makeMultiBlockData({generateRange(0, 200), generateRange(500, 200)});
+    auto docsB = generateRange(0, 350, 2); // 0,2,4,...,698
+    auto infoB = makeEmbeddedInfo(docsB);
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeEmbeddedCursor(infoB);
+
+    auto result = intersectAndCollect(postings, {"a", "b"}, 0, 700, true);
+
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 0; d < 200; d += 2) expected.push_back(d);
+    for (uint32_t d = 500; d < 700; d += 2) expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, MultiBlockWithEmbeddedBruteForceThreeWay)
+{
+    /// 3-way brute-force: multi-block A, multi-block B, embedded C.
+    auto dataA = makeMultiBlockData({generateRange(0, 300)});
+    auto dataB = makeMultiBlockData({generateRange(100, 300)});
+    auto docsC = generateRange(150, 50); // 150..199
+    auto infoC = makeEmbeddedInfo(docsC);
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeMultiBlockCursor(dataB);
+    postings["c"] = makeEmbeddedCursor(infoC);
+
+    auto result = intersectAndCollect(postings, {"a", "b", "c"}, 0, 500, true);
+
+    /// A=[0..299], B=[100..399], C=[150..199]
+    /// Intersection = [150..199]
+    std::vector<uint32_t> expected = generateRange(150, 50);
+    EXPECT_EQ(result, expected);
+}
+
+
+// ===========================================================================================
+// Section 49: Multi-block — linearOrImpl/linearAndImpl packed block skip/early-return branches
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockLinearOrPackedBlockSkipBeforeRange)
+{
+    /// 400 docs: first_doc_id=0, docs 0..399. Packed blocks:
+    ///   block 0: docs 0..128, block 1: docs 129..256, block 2: docs 257..384, tail: 385..399
+    /// linearOr with row_offset=300 should skip blocks 0 and 1 (back() < 300),
+    /// then process blocks 2 and tail.
+    std::vector<uint32_t> docs = generateRange(0, 400);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 300, 100); // [300, 400)
+    std::vector<uint32_t> expected = generateRange(300, 100);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, MultiBlockLinearOrPackedBlockEarlyReturnAfterRange)
+{
+    /// Same 400 docs. linearOr with range [50, 150) should process block 0 and
+    /// part of block 1, then early-return when block 2's front > 150.
+    std::vector<uint32_t> docs = generateRange(0, 400);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 50, 100); // [50, 150)
+    std::vector<uint32_t> expected = generateRange(50, 100);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, MultiBlockLinearAndPackedBlockSkipAndEarlyReturn)
+{
+    /// Verify that linearAnd also correctly skips blocks before range and
+    /// stops early after range.
+    std::vector<uint32_t> docs = generateRange(0, 500);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    std::vector<UInt8> buf(100, 0);
+    cursor->linearAnd(buf.data(), 200, 100); // [200, 300)
+
+    for (size_t i = 0; i < 100; ++i)
+        EXPECT_EQ(buf[i], 1u) << "Expected buf[" << i << "] == 1 (doc " << (200 + i) << ")";
+}
+
+
+// ===========================================================================================
+// Section 50: Multi-block — union with multiple multi-block cursors
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockUnionThreeMultiBlockCursors)
+{
+    auto dataA = makeMultiBlockData({generateRange(0, 150)});   // 0..149
+    auto dataB = makeMultiBlockData({generateRange(200, 150)});  // 200..349
+    auto dataC = makeMultiBlockData({generateRange(400, 150)});  // 400..549
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeMultiBlockCursor(dataB);
+    postings["c"] = makeMultiBlockCursor(dataC);
+
+    auto result = unionAndCollect(postings, {"a", "b", "c"}, 0, 600);
+
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 0; d < 150; ++d) expected.push_back(d);
+    for (uint32_t d = 200; d < 350; ++d) expected.push_back(d);
+    for (uint32_t d = 400; d < 550; ++d) expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, MultiBlockUnionOverlapping)
+{
+    /// Two multi-block cursors with overlapping doc ranges.
+    auto dataA = makeMultiBlockData({generateRange(0, 200)});   // 0..199
+    auto dataB = makeMultiBlockData({generateRange(100, 200)});  // 100..299
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeMultiBlockCursor(dataB);
+
+    auto result = unionAndCollect(postings, {"a", "b"}, 0, 300);
+
+    /// Union should be 0..299
+    std::vector<uint32_t> expected = generateRange(0, 300);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, MultiBlockUnionWithWindow)
+{
+    auto dataA = makeMultiBlockData({generateRange(0, 200), generateRange(500, 200)});
+    auto dataB = makeMultiBlockData({generateRange(300, 200)});
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeMultiBlockCursor(dataB);
+
+    /// Window [250, 600) should capture: A's [500..599], B's [300..499]
+    auto result = unionAndCollect(postings, {"a", "b"}, 250, 350);
+
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 300; d < 500; ++d) expected.push_back(d);
+    for (uint32_t d = 500; d < 600; ++d) expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+
+// ===========================================================================================
+// Section 51: Multi-block intersection — brute-force vs leapfrog consistency (3+ cursors)
+// ===========================================================================================
+
+TEST(PostingListCursorTest, MultiBlockBruteForceVsLeapfrogThreeWay)
+{
+    auto dataA = makeMultiBlockData({generateRange(0, 300), generateRange(500, 200)});
+    auto dataB = makeMultiBlockData({generateRange(50, 300), generateRange(550, 200)});
+    auto dataC = makeMultiBlockData({generateRange(100, 200), generateRange(600, 150)});
+
+    // Brute force
+    PostingListCursorMap postings_bf;
+    postings_bf["a"] = makeMultiBlockCursor(dataA);
+    postings_bf["b"] = makeMultiBlockCursor(dataB);
+    postings_bf["c"] = makeMultiBlockCursor(dataC);
+    auto bf = intersectAndCollect(postings_bf, {"a", "b", "c"}, 0, 800, true);
+
+    // Leapfrog
+    PostingListCursorMap postings_lf;
+    postings_lf["a"] = makeMultiBlockCursor(dataA);
+    postings_lf["b"] = makeMultiBlockCursor(dataB);
+    postings_lf["c"] = makeMultiBlockCursor(dataC);
+    auto lf = intersectAndCollect(postings_lf, {"a", "b", "c"}, 0, 800, false, 100.0);
+
+    EXPECT_EQ(bf, lf);
+
+    /// Also verify expected result:
+    /// A∩B∩C block0: [100..299] ∩ [50..349] ∩ [0..299] = [100..299]
+    /// A∩B∩C block1: [500..699] ∩ [550..749] ∩ [600..749] = [600..699]
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 100; d < 300; ++d) expected.push_back(d);
+    for (uint32_t d = 600; d < 700; ++d) expected.push_back(d);
+    EXPECT_EQ(bf, expected);
+}
+
+TEST(PostingListCursorTest, MultiBlockBruteForceVsLeapfrogFourWay)
+{
+    auto dataA = makeMultiBlockData({generateRange(0, 250)});
+    auto dataB = makeMultiBlockData({generateRange(50, 250)});
+    auto dataC = makeMultiBlockData({generateRange(100, 250)});
+    auto dataD = makeMultiBlockData({generateRange(150, 250)});
+
+    PostingListCursorMap postings_bf;
+    postings_bf["a"] = makeMultiBlockCursor(dataA);
+    postings_bf["b"] = makeMultiBlockCursor(dataB);
+    postings_bf["c"] = makeMultiBlockCursor(dataC);
+    postings_bf["d"] = makeMultiBlockCursor(dataD);
+    auto bf = intersectAndCollect(postings_bf, {"a", "b", "c", "d"}, 0, 500, true);
+
+    PostingListCursorMap postings_lf;
+    postings_lf["a"] = makeMultiBlockCursor(dataA);
+    postings_lf["b"] = makeMultiBlockCursor(dataB);
+    postings_lf["c"] = makeMultiBlockCursor(dataC);
+    postings_lf["d"] = makeMultiBlockCursor(dataD);
+    auto lf = intersectAndCollect(postings_lf, {"a", "b", "c", "d"}, 0, 500, false, 100.0);
+
+    EXPECT_EQ(bf, lf);
+
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 150; d < 250; ++d) expected.push_back(d);
+    EXPECT_EQ(bf, expected);
+}
