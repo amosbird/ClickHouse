@@ -6,7 +6,7 @@
 #include <algorithm>
 
 #include <turbopfor.h>
-
+#pragma clang optimize off
 namespace DB
 {
 
@@ -95,6 +95,13 @@ PostingListCursor::PostingListCursor(LargePostingListReaderStreamPtr owned_strea
 {
     if (total_large_blocks > 0)
         prepare(0);
+    else if (info.embedded_postings)
+    {
+        /// Embedded postings with no ranges/offsets — call prepare to decode them.
+        prepare(0);
+    }
+    else
+        is_valid = false;
 }
 
 PostingListCursor::PostingListCursor(const TokenPostingsInfo & info_)
@@ -109,8 +116,6 @@ UInt32 PostingListCursor::cardinality() const
 
 void PostingListCursor::prepare(size_t large_block_idx)
 {
-    if (current_large_block_idx == large_block_idx && has_prepared_first_large_block)
-        return;
     has_prepared_first_large_block = true;
 
     /// Large block 0's packed block 0 needs to prepend `first_doc_id` (which is stored
@@ -129,7 +134,7 @@ void PostingListCursor::prepare(size_t large_block_idx)
         current_block = 0;
         block_count = 1;
         current_large_block_idx = large_block_idx;
-        is_valid = true;
+        is_valid = !current_values.empty();
         is_embedded = true;
 
         if (current_values.size() >= 2)
@@ -259,17 +264,21 @@ bool PostingListCursor::decodeNextBlock()
 
 void PostingListCursor::seek(uint32_t target)
 {
+    /// Fast path: try current already-prepared large block first.
     if (!is_embedded && seekImpl(target))
         return;
 
+    /// Slow path: current large block doesn't contain target.
+    /// Start from next large block (current one already failed in fast path).
+    /// For embedded postings, seekImpl above was skipped, so start from current_large_block_idx.
     bool found = false;
-    for (size_t i = current_large_block_idx; i < total_large_blocks; ++i)
+    size_t start = is_embedded ? current_large_block_idx : current_large_block_idx + 1;
+    for (size_t i = start; i < total_large_blocks; ++i)
     {
-        auto large_block = i;
-        const auto & range = info.ranges[large_block];
+        const auto & range = info.ranges[i];
         if (range.end >= target)
         {
-            prepare(large_block);
+            prepare(i);
             if (seekImpl(target))
             {
                 found = true;
@@ -342,11 +351,23 @@ void PostingListCursor::next()
     if (index >= current_values.size())
     {
         ++current_block;
-        if (current_block >= block_count)
+        if (current_block < block_count)
+        {
+            /// Still within current large block, decode next packed block.
+            /// Sequential read: need_seek_before_decode stays false.
+            decodeNextBlock();
+            return;
+        }
+
+        /// All packed blocks in current large block exhausted, advance to next large block.
+        size_t next_large_block = current_large_block_idx + 1;
+        if (next_large_block >= total_large_blocks)
         {
             is_valid = false;
             return;
         }
+
+        prepare(next_large_block);
         decodeNextBlock();
     }
 }
@@ -442,10 +463,12 @@ void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_row
         size_t begin = info.ranges[large_block].begin;
         size_t end = info.ranges[large_block].end;
 
-        if (row_offset > end || (row_offset + num_rows) < begin)
-        {
+        if (row_offset > end)
             continue;
-        }
+
+        if ((row_offset + num_rows) < begin)
+            break;
+
         end = std::min(end, row_offset + num_rows - 1);
         prepare(large_block);
         linearOrImpl(large_block, data, row_offset, end);
@@ -535,10 +558,12 @@ void PostingListCursor::linearAnd(UInt8 * data, size_t row_offset, size_t num_ro
         size_t begin = info.ranges[large_block].begin;
         size_t end = info.ranges[large_block].end;
 
-        if (row_offset > end || (row_offset + num_rows) < begin)
-        {
+        if (row_offset > end)
             continue;
-        }
+
+        if ((row_offset + num_rows) < begin)
+            break;
+
         end = std::min(end, row_offset + num_rows - 1);
         prepare(large_block);
         linearAndImpl(large_block, data, row_offset, end);
