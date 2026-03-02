@@ -1,8 +1,6 @@
 #include <Storages/MergeTree/MergeTreeIndexTextPostingListCursor.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeReaderStream.h>
-#include <Common/ElapsedTimeProfileEventIncrement.h>
-#include <IO/ReadHelpers.h>
 #include <algorithm>
 
 #include <turbopfor.h>
@@ -419,8 +417,36 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
         return;
     }
 
-    /// Process the current packed block, then decode and process subsequent blocks.
-    for (size_t blk = current_block; blk < block_count; ++blk)
+    /// Use packed_block_last_doc_ids[] to determine the range of packed blocks
+    /// that overlap [row_begin, row_end], skipping all blocks outside this range
+    /// without any I/O or decoding.
+    ///
+    /// packed_block_last_doc_ids[j] is the last doc_id in packed block j.
+    /// The first doc_id of block j is approximately packed_block_last_doc_ids[j-1]+1
+    /// (or info.ranges[large_block].begin for block 0).
+    ///
+    /// We want the first block whose last_doc_id >= row_begin (it may contain row_begin)
+    /// and the last block whose first doc_id could be <= row_end.
+    auto blk_start_it = std::lower_bound(packed_block_last_doc_ids.begin(), packed_block_last_doc_ids.end(), static_cast<UInt32>(row_begin));
+    if (blk_start_it == packed_block_last_doc_ids.end())
+        return;  /// All blocks end before row_begin.
+    size_t blk_start = static_cast<size_t>(blk_start_it - packed_block_last_doc_ids.begin());
+
+    /// Find the last block that could contain doc_ids in [row_begin, row_end].
+    /// lower_bound(row_end) returns the first block with last_doc_id >= row_end;
+    /// that block is the last one we need (it contains or ends at row_end).
+    auto blk_end_it = std::lower_bound(packed_block_last_doc_ids.begin(), packed_block_last_doc_ids.end(), static_cast<UInt32>(row_end));
+    size_t blk_end;
+    if (blk_end_it == packed_block_last_doc_ids.end())
+        blk_end = block_count;  /// row_end exceeds all blocks — process them all.
+    else
+        blk_end = static_cast<size_t>(blk_end_it - packed_block_last_doc_ids.begin()) + 1;  /// +1 for exclusive upper bound.
+
+    /// Seek directly to the first relevant packed block.
+    current_block = blk_start;
+    need_seek_before_decode = true;
+
+    for (size_t blk = blk_start; blk < blk_end; ++blk)
     {
         current_block = blk;
         if (!decodeNextBlock())
@@ -429,23 +455,40 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
         if (current_values.empty())
             continue;
 
-        if (current_values.back() < row_begin)  /// Entire block before range — skip.
-            continue;
+        /// For the first and last blocks in the range, the block may only partially
+        /// overlap [row_begin, row_end] — use binary search to clip.
+        /// For all middle blocks, every doc_id is guaranteed to be within
+        /// [row_begin, row_end], so skip the binary searches entirely.
+        bool is_first_block = (blk == blk_start);
+        bool is_last_block = (blk + 1 == blk_end);
+        bool need_clip = (is_first_block && current_values.front() < row_begin)
+                      || (is_last_block && current_values.back() > row_end);
 
-        if (current_values.front() > row_end)   /// Entire block after range — done.
-            return;
+        if (need_clip)
+        {
+            size_t begin_idx = 0;
+            size_t end_idx = current_values.size();
 
-        auto it = std::lower_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_begin));
-        if (it == current_values.end())
-            continue;
-        size_t begin_idx = static_cast<size_t>(it - current_values.begin());
-        auto it_end = std::upper_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_end));
-        size_t end_idx = it_end - current_values.begin();
+            if (is_first_block && current_values.front() < row_begin)
+            {
+                auto it = std::lower_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_begin));
+                if (it == current_values.end())
+                    continue;
+                begin_idx = static_cast<size_t>(it - current_values.begin());
+            }
+            if (is_last_block && current_values.back() > row_end)
+            {
+                auto it_end = std::upper_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_end));
+                end_idx = static_cast<size_t>(it_end - current_values.begin());
+            }
 
-        padColumnForOr(out, current_values, row_begin, begin_idx, end_idx);
-
-        if (end_idx < current_values.size())
-            return;
+            padColumnForOr(out, current_values, row_begin, begin_idx, end_idx);
+        }
+        else
+        {
+            /// Entire block is within [row_begin, row_end] — no clipping needed.
+            padColumnForOr(out, current_values, row_begin, 0, current_values.size());
+        }
     }
 }
 
@@ -516,8 +559,24 @@ void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out
         return;
     }
 
-    /// Process the current already-decoded block, then decode subsequent blocks sequentially.
-    for (size_t blk = current_block; blk < block_count; ++blk)
+    /// Use packed_block_last_doc_ids[] to skip blocks outside [row_begin, row_end]
+    /// without decoding.  Same strategy as linearOrImpl.
+    auto blk_start_it = std::lower_bound(packed_block_last_doc_ids.begin(), packed_block_last_doc_ids.end(), static_cast<UInt32>(row_begin));
+    if (blk_start_it == packed_block_last_doc_ids.end())
+        return;
+    size_t blk_start = static_cast<size_t>(blk_start_it - packed_block_last_doc_ids.begin());
+
+    auto blk_end_it = std::lower_bound(packed_block_last_doc_ids.begin(), packed_block_last_doc_ids.end(), static_cast<UInt32>(row_end));
+    size_t blk_end;
+    if (blk_end_it == packed_block_last_doc_ids.end())
+        blk_end = block_count;
+    else
+        blk_end = static_cast<size_t>(blk_end_it - packed_block_last_doc_ids.begin()) + 1;
+
+    current_block = blk_start;
+    need_seek_before_decode = true;
+
+    for (size_t blk = blk_start; blk < blk_end; ++blk)
     {
         current_block = blk;
         if (!decodeNextBlock())
@@ -526,23 +585,35 @@ void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out
         if (current_values.empty())
             continue;
 
-        if (current_values.back() < row_begin)
-            continue;
+        bool is_first_block = (blk == blk_start);
+        bool is_last_block = (blk + 1 == blk_end);
+        bool need_clip = (is_first_block && current_values.front() < row_begin)
+                      || (is_last_block && current_values.back() > row_end);
 
-        if (current_values.front() > row_end)
-            return;
+        if (need_clip)
+        {
+            size_t begin_idx = 0;
+            size_t end_idx = current_values.size();
 
-        auto it = std::lower_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_begin));
-        if (it == current_values.end())
-            continue;
-        size_t idx = static_cast<size_t>(it - current_values.begin());
-        auto it_end = std::upper_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_end));
-        size_t length = it_end - current_values.begin();
+            if (is_first_block && current_values.front() < row_begin)
+            {
+                auto it = std::lower_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_begin));
+                if (it == current_values.end())
+                    continue;
+                begin_idx = static_cast<size_t>(it - current_values.begin());
+            }
+            if (is_last_block && current_values.back() > row_end)
+            {
+                auto it_end = std::upper_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_end));
+                end_idx = static_cast<size_t>(it_end - current_values.begin());
+            }
 
-        padColumnForAnd(out, current_values, row_begin, idx, length);
-
-        if (length < current_values.size())
-            return;
+            padColumnForAnd(out, current_values, row_begin, begin_idx, end_idx);
+        }
+        else
+        {
+            padColumnForAnd(out, current_values, row_begin, 0, current_values.size());
+        }
     }
 }
 
