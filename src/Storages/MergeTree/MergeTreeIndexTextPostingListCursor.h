@@ -34,7 +34,7 @@ using LargePostingListReaderStreamPtr = std::shared_ptr<LargePostingListReaderSt
 ///   `packed_block_offsets[j]`      — absolute byte offset of packed block j in .lpst
 /// These enable O(log N) seek via binary search + random file access.
 ///
-/// Embedded postings (small cardinality tokens) are stored inline as a Roaring Bitmap
+/// Embedded postings (small cardinality tokens) are stored inline as a array
 /// in the dictionary stream and decoded entirely in `prepare`; no .lpst stream is used.
 ///
 /// Two access patterns:
@@ -62,7 +62,7 @@ public:
     bool valid() const { return is_valid; }
 
     /// Current doc_id.  Undefined when `valid` returns false.
-    uint32_t value() const { return current_values[index]; }
+    uint32_t value() const { return decoded_values[index]; }
 
     /// Advance to the first doc_id >= target.
     void seek(uint32_t target);
@@ -81,7 +81,7 @@ private:
     /// Load metadata for `large_block_idx`-th large block.
     /// For large postings: reads the Index Section from .lpst (packed block index),
     /// but does NOT decode any packed block data yet.
-    /// For embedded postings: decodes the entire Roaring Bitmap into `current_values`.
+    /// For embedded postings: decodes the entire array into `decoded_values`.
     void prepare(size_t large_block);
 
     void linearOrImpl(size_t large_block, UInt8 *, size_t row_begin, size_t row_end);
@@ -104,8 +104,11 @@ private:
 
     const TokenPostingsInfo & info;
 
-    std::vector<uint32_t> current_values;  /// Decoded doc_ids of the current packed block.
-    size_t index = 0;                      /// Read position within current_values.
+    /// Decoded doc_ids of the current packed block (large postings) or all doc_ids (embedded postings).
+    /// Fixed-size: 128 packed + 1 for first_doc_id prepend.  Embedded postings have at most 6 entries.
+    alignas(16) uint32_t decoded_values[TURBOPFOR_BLOCK_SIZE + 1]{};
+    size_t decoded_count = 0;              /// Number of valid entries in decoded_values.
+    size_t index = 0;                      /// Read position within decoded_values.
 
     /// Per-large-block packed block layout (recomputed in `prepare`).
     size_t block_count = 0;              /// Total packed blocks, including the tail block.

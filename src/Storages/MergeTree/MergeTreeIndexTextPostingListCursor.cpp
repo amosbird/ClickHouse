@@ -114,26 +114,24 @@ void PostingListCursor::prepare(size_t large_block_idx)
 {
     has_prepared_first_large_block = true;
 
-    /// Large block 0, packed block 0 needs an extra slot for `first_doc_id`
-    /// (stored in the dictionary, not in TurboPFor data).
-    current_values.reserve(TURBOPFOR_BLOCK_SIZE + (large_block_idx == 0 ? 1 : 0));
-    current_values.clear();
+    decoded_count = 0;
 
     if (info.embedded_postings)
     {
         /// Embedded posting list: already materialized as a Roaring Bitmap.
-        /// Decode all doc_ids into current_values in one shot.
+        /// Decode all doc_ids into decoded_values in one shot (at most 6 entries).
         chassert(!stream);
-        current_values.resize(info.embedded_postings->cardinality());
-        info.embedded_postings->toUint32Array(current_values.data());
+        decoded_count = info.embedded_postings->cardinality();
+        chassert(decoded_count <= TURBOPFOR_BLOCK_SIZE + 1);
+        info.embedded_postings->toUint32Array(decoded_values);
         current_block = 0;
         block_count = 1;
         current_large_block_idx = large_block_idx;
-        is_valid = !current_values.empty();
+        is_valid = decoded_count > 0;
         is_embedded = true;
 
-        if (current_values.size() >= 2)
-            density_val = static_cast<double>(current_values.size()) / static_cast<double>(current_values.back() - current_values.front() + 1);
+        if (decoded_count >= 2)
+            density_val = static_cast<double>(decoded_count) / static_cast<double>(decoded_values[decoded_count - 1] - decoded_values[0] + 1);
         else
             density_val = 1.0;
         return;
@@ -240,8 +238,8 @@ bool PostingListCursor::decodeNextBlock()
     bool prepend_first_doc_id = (current_large_block_idx == 0 && current_block == 0);
     UInt32 actual_count = prepend_first_doc_id ? count + 1 : count;
 
-    current_values.resize(actual_count);
-    uint32_t * decode_dst = current_values.data() + (prepend_first_doc_id ? 1 : 0);
+    decoded_count = actual_count;
+    uint32_t * decode_dst = decoded_values + (prepend_first_doc_id ? 1 : 0);
 
     if (count == 128)
         turbopfor::p4D1Dec128v32(src_ptr, 128, decode_dst, last_decoded_doc_id);
@@ -249,9 +247,9 @@ bool PostingListCursor::decodeNextBlock()
         turbopfor::p4D1Dec32(src_ptr, count, decode_dst, last_decoded_doc_id);
 
     if (prepend_first_doc_id)
-        current_values[0] = static_cast<uint32_t>(info.ranges[0].begin);
+        decoded_values[0] = static_cast<uint32_t>(info.ranges[0].begin);
 
-    last_decoded_doc_id = current_values[actual_count - 1];
+    last_decoded_doc_id = decoded_values[actual_count - 1];
     index = 0;
 
     return true;
@@ -288,23 +286,23 @@ bool PostingListCursor::seekImpl(uint32_t target)
 {
     if (is_embedded)
     {
-        /// Embedded: all doc_ids are in current_values, use binary search.
-        auto it = std::lower_bound(current_values.begin(), current_values.end(), target);
-        if (it != current_values.end())
+        /// Embedded: all doc_ids are in decoded_values, use binary search.
+        auto it = std::lower_bound(decoded_values, decoded_values + decoded_count, target);
+        if (it != decoded_values + decoded_count)
         {
-            index = static_cast<size_t>(it - current_values.begin());
+            index = static_cast<size_t>(it - decoded_values);
             return true;
         }
         return false;
     }
 
     /// Check if target falls within the already-decoded packed block.
-    if (index < current_values.size())
+    if (index < decoded_count)
     {
-        auto it = std::lower_bound(current_values.begin() + index, current_values.end(), target);
-        if (it != current_values.end())
+        auto it = std::lower_bound(decoded_values + index, decoded_values + decoded_count, target);
+        if (it != decoded_values + decoded_count)
         {
-            index = static_cast<size_t>(it - current_values.begin());
+            index = static_cast<size_t>(it - decoded_values);
             return true;
         }
     }
@@ -324,10 +322,10 @@ bool PostingListCursor::seekImpl(uint32_t target)
     decodeNextBlock();
 
     /// Binary search within the decoded packed block.
-    auto found_it = std::lower_bound(current_values.begin(), current_values.end(), target);
-    if (found_it != current_values.end())
+    auto found_it = std::lower_bound(decoded_values, decoded_values + decoded_count, target);
+    if (found_it != decoded_values + decoded_count)
     {
-        index = static_cast<size_t>(found_it - current_values.begin());
+        index = static_cast<size_t>(found_it - decoded_values);
         return true;
     }
 
@@ -341,7 +339,7 @@ void PostingListCursor::next()
 
     ++index;
 
-    if (index >= current_values.size())
+    if (index >= decoded_count)
     {
         ++current_block;
         if (current_block < block_count)
@@ -364,13 +362,12 @@ void PostingListCursor::next()
     }
 }
 
-/// Scatter-write 1s into `out` for doc_ids in current_values[begin..length).
+/// Scatter-write 1s into `out` for doc_ids in values[begin..length).
 /// 4-wide loop with prefetch for cache-line utilization.
-inline void padColumnForOr(UInt8 * __restrict out, const std::vector<uint32_t> & current_values, size_t row_begin, size_t begin, size_t length)
+inline void padColumnForOr(UInt8 * __restrict out, const uint32_t * values, size_t row_begin, size_t begin, size_t length)
 {
-    const uint32_t * data = current_values.data();
-    const uint32_t * data_begin = data + begin;
-    const uint32_t * data_end = data + length;
+    const uint32_t * data_begin = values + begin;
+    const uint32_t * data_end = values + length;
 
     if (data_begin >= data_end)
         return;
@@ -407,13 +404,13 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
 
     if (unlikely(is_embedded))
     {
-        auto it = std::lower_bound(current_values.begin(), current_values.end(), row_begin);
-        if (it == current_values.end())
+        auto it = std::lower_bound(decoded_values, decoded_values + decoded_count, row_begin);
+        if (it == decoded_values + decoded_count)
             return;
-        size_t begin_idx = static_cast<size_t>(it - current_values.begin());
-        auto it_end = std::upper_bound(current_values.begin(), current_values.end(), row_end);
-        size_t end_idx = it_end - current_values.begin();
-        padColumnForOr(out, current_values, row_begin, begin_idx, end_idx);
+        size_t begin_idx = static_cast<size_t>(it - decoded_values);
+        auto it_end = std::upper_bound(decoded_values, decoded_values + decoded_count, row_end);
+        size_t end_idx = it_end - decoded_values;
+        padColumnForOr(out, decoded_values, row_begin, begin_idx, end_idx);
         return;
     }
 
@@ -452,7 +449,7 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
         if (!decodeNextBlock())
             return;
 
-        if (current_values.empty())
+        if (decoded_count == 0)
             continue;
 
         /// For the first and last blocks in the range, the block may only partially
@@ -461,33 +458,33 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
         /// [row_begin, row_end], so skip the binary searches entirely.
         bool is_first_block = (blk == blk_start);
         bool is_last_block = (blk + 1 == blk_end);
-        bool need_clip = (is_first_block && current_values.front() < row_begin)
-                      || (is_last_block && current_values.back() > row_end);
+        bool need_clip = (is_first_block && decoded_values[0] < row_begin)
+                      || (is_last_block && decoded_values[decoded_count - 1] > row_end);
 
         if (need_clip)
         {
             size_t begin_idx = 0;
-            size_t end_idx = current_values.size();
+            size_t end_idx = decoded_count;
 
-            if (is_first_block && current_values.front() < row_begin)
+            if (is_first_block && decoded_values[0] < row_begin)
             {
-                auto it = std::lower_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_begin));
-                if (it == current_values.end())
+                auto it = std::lower_bound(decoded_values, decoded_values + decoded_count, static_cast<uint32_t>(row_begin));
+                if (it == decoded_values + decoded_count)
                     continue;
-                begin_idx = static_cast<size_t>(it - current_values.begin());
+                begin_idx = static_cast<size_t>(it - decoded_values);
             }
-            if (is_last_block && current_values.back() > row_end)
+            if (is_last_block && decoded_values[decoded_count - 1] > row_end)
             {
-                auto it_end = std::upper_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_end));
-                end_idx = static_cast<size_t>(it_end - current_values.begin());
+                auto it_end = std::upper_bound(decoded_values, decoded_values + decoded_count, static_cast<uint32_t>(row_end));
+                end_idx = static_cast<size_t>(it_end - decoded_values);
             }
 
-            padColumnForOr(out, current_values, row_begin, begin_idx, end_idx);
+            padColumnForOr(out, decoded_values, row_begin, begin_idx, end_idx);
         }
         else
         {
             /// Entire block is within [row_begin, row_end] — no clipping needed.
-            padColumnForOr(out, current_values, row_begin, 0, current_values.size());
+            padColumnForOr(out, decoded_values, row_begin, 0, decoded_count);
         }
     }
 }
@@ -512,12 +509,12 @@ void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_row
     }
 }
 
-/// Scatter-increment counters in `out` for doc_ids in current_values[begin..length).
+/// Scatter-increment counters in `out` for doc_ids in values[begin..length).
 /// 4-wide loop with prefetch for cache-line utilization.
-inline void padColumnForAnd(UInt8 * __restrict out, const std::vector<uint32_t> & current_values, size_t row_begin, size_t begin, size_t length)
+inline void padColumnForAnd(UInt8 * __restrict out, const uint32_t * values, size_t row_begin, size_t begin, size_t length)
 {
-    const uint32_t *p = current_values.data() + begin;
-    const uint32_t *end = current_values.data() + length;
+    const uint32_t *p = values + begin;
+    const uint32_t *end = values + length;
 
     for (; p + 4 <= end; p += 4)
     {
@@ -549,13 +546,13 @@ void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out
 
     if (unlikely(is_embedded))
     {
-        auto it = std::lower_bound(current_values.begin(), current_values.end(), row_begin);
-        if (it == current_values.end())
+        auto it = std::lower_bound(decoded_values, decoded_values + decoded_count, row_begin);
+        if (it == decoded_values + decoded_count)
             return;
-        size_t idx = static_cast<size_t>(it - current_values.begin());
-        auto it_end = std::upper_bound(current_values.begin(), current_values.end(), row_end);
-        size_t length = it_end - current_values.begin();
-        padColumnForAnd(out, current_values, row_begin, idx, length);
+        size_t idx = static_cast<size_t>(it - decoded_values);
+        auto it_end = std::upper_bound(decoded_values, decoded_values + decoded_count, row_end);
+        size_t length = it_end - decoded_values;
+        padColumnForAnd(out, decoded_values, row_begin, idx, length);
         return;
     }
 
@@ -582,37 +579,37 @@ void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out
         if (!decodeNextBlock())
             return;
 
-        if (current_values.empty())
+        if (decoded_count == 0)
             continue;
 
         bool is_first_block = (blk == blk_start);
         bool is_last_block = (blk + 1 == blk_end);
-        bool need_clip = (is_first_block && current_values.front() < row_begin)
-                      || (is_last_block && current_values.back() > row_end);
+        bool need_clip = (is_first_block && decoded_values[0] < row_begin)
+                      || (is_last_block && decoded_values[decoded_count - 1] > row_end);
 
         if (need_clip)
         {
             size_t begin_idx = 0;
-            size_t end_idx = current_values.size();
+            size_t end_idx = decoded_count;
 
-            if (is_first_block && current_values.front() < row_begin)
+            if (is_first_block && decoded_values[0] < row_begin)
             {
-                auto it = std::lower_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_begin));
-                if (it == current_values.end())
+                auto it = std::lower_bound(decoded_values, decoded_values + decoded_count, static_cast<uint32_t>(row_begin));
+                if (it == decoded_values + decoded_count)
                     continue;
-                begin_idx = static_cast<size_t>(it - current_values.begin());
+                begin_idx = static_cast<size_t>(it - decoded_values);
             }
-            if (is_last_block && current_values.back() > row_end)
+            if (is_last_block && decoded_values[decoded_count - 1] > row_end)
             {
-                auto it_end = std::upper_bound(current_values.begin(), current_values.end(), static_cast<uint32_t>(row_end));
-                end_idx = static_cast<size_t>(it_end - current_values.begin());
+                auto it_end = std::upper_bound(decoded_values, decoded_values + decoded_count, static_cast<uint32_t>(row_end));
+                end_idx = static_cast<size_t>(it_end - decoded_values);
             }
 
-            padColumnForAnd(out, current_values, row_begin, begin_idx, end_idx);
+            padColumnForAnd(out, decoded_values, row_begin, begin_idx, end_idx);
         }
         else
         {
-            padColumnForAnd(out, current_values, row_begin, 0, current_values.size());
+            padColumnForAnd(out, decoded_values, row_begin, 0, decoded_count);
         }
     }
 }
