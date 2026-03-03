@@ -22,6 +22,7 @@
 #include <fstream>
 #include <numeric>
 #include <random>
+#include <set>
 #include <vector>
 
 using namespace DB;
@@ -2900,4 +2901,552 @@ TEST(PostingListCursorTest, MultiBlockBruteForceVsLeapfrogFourWay)
     std::vector<uint32_t> expected;
     for (uint32_t d = 150; d < 250; ++d) expected.push_back(d);
     EXPECT_EQ(bf, expected);
+}
+
+
+// ===========================================================================================
+// Section: Arithmetic block skip optimization tests
+//
+// These tests verify that the TurboPFor constant/zero-delta block fast-skip
+// optimization produces identical results to full decompression.  Key scenarios:
+//   - Zero-delta blocks (consecutive doc_ids, step=1)
+//   - Constant-delta blocks (uniform step > 1)
+//   - Mixed blocks (some arithmetic, some not)
+//   - seek/next/linearOr/linearAnd/intersection through arithmetic blocks
+//   - Tail blocks (< 128 elements) that are arithmetic
+//   - Large block 0 packed block 0 is excluded (prepend_first_doc_id)
+//   - Transitions between arithmetic and non-arithmetic blocks
+// ===========================================================================================
+
+/// Zero-delta block: 257 consecutive docs → packed block 0 (128, prepend, not arithmetic),
+/// packed block 1 (128, zero-delta → arithmetic).  Seek into the arithmetic block.
+TEST(PostingListCursorTest, ArithmeticZeroDeltaSeekDrain)
+{
+    auto docs = generateRange(0, 257);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Seek to a doc_id in the second packed block (block 1, which is arithmetic).
+    cursor->seek(200);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 200u);
+
+    /// Drain the rest and verify.
+    auto remaining = drainCursor(cursor);
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 200; d <= 256; ++d)
+        expected.push_back(d);
+    EXPECT_EQ(remaining, expected);
+}
+
+/// Zero-delta: full drain via seek(0) + next.
+TEST(PostingListCursorTest, ArithmeticZeroDeltaFullDrain)
+{
+    auto docs = generateRange(0, 257);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto all = seekAndDrainCursor(cursor, 0);
+    EXPECT_EQ(all, docs);
+}
+
+/// Zero-delta: linearOr over the full range.
+TEST(PostingListCursorTest, ArithmeticZeroDeltaLinearOr)
+{
+    auto docs = generateRange(0, 257);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 0, 260);
+    EXPECT_EQ(result, docs);
+}
+
+/// Zero-delta: linearOr with a partial range that clips into the arithmetic block.
+TEST(PostingListCursorTest, ArithmeticZeroDeltaLinearOrPartialRange)
+{
+    auto docs = generateRange(0, 257);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Request range [150, 230) — starts in packed block 1 (arithmetic).
+    auto result = linearOrToDocIds(cursor, 150, 80);
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 150; d < 230; ++d)
+        expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+/// Zero-delta: linearAnd over full range.
+TEST(PostingListCursorTest, ArithmeticZeroDeltaLinearAnd)
+{
+    auto docs = generateRange(0, 257);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    std::vector<UInt8> buf(260, 0);
+    cursor->linearAnd(buf.data(), 0, 260);
+    /// linearAnd increments counters; check that the arithmetic block docs are counted.
+    for (uint32_t d = 0; d <= 256; ++d)
+        EXPECT_EQ(buf[d], 1u) << "at doc_id " << d;
+    for (uint32_t d = 257; d < 260; ++d)
+        EXPECT_EQ(buf[d], 0u);
+}
+
+/// Constant-delta block: step=3 (constant_value=2).
+/// 257 docs with step 3: block 1 is constant-delta arithmetic.
+TEST(PostingListCursorTest, ArithmeticConstantDeltaSeekDrain)
+{
+    auto docs = generateRange(0, 257, 3);  // 0, 3, 6, 9, ..., 768
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Seek to something in the second packed block (arithmetic, step=3).
+    /// Block 1 starts at docs[129] = 129*3 = 387.
+    cursor->seek(400);
+    ASSERT_TRUE(cursor->valid());
+    /// 400 is not a multiple of 3 from 0, so we expect the next multiple: ceil((400-387)/3)*3 + 387
+    /// docs in block 1: 387, 390, 393, ...; first >= 400 is 402.
+    EXPECT_EQ(cursor->value(), 402u);
+
+    cursor->next();
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 405u);
+}
+
+/// Constant-delta: full drain.
+TEST(PostingListCursorTest, ArithmeticConstantDeltaFullDrain)
+{
+    auto docs = generateRange(0, 257, 3);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto all = seekAndDrainCursor(cursor, 0);
+    EXPECT_EQ(all, docs);
+}
+
+/// Constant-delta: linearOr.
+TEST(PostingListCursorTest, ArithmeticConstantDeltaLinearOr)
+{
+    auto docs = generateRange(0, 257, 3);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 0, 770);
+    EXPECT_EQ(result, docs);
+}
+
+/// Constant-delta: seek to exact arithmetic value.
+TEST(PostingListCursorTest, ArithmeticConstantDeltaSeekExact)
+{
+    auto docs = generateRange(10, 257, 5);  // 10, 15, 20, ..., 10 + 256*5 = 1290
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Seek to 650 (which is 10 + 128*5 = 650, first doc of block 1).
+    cursor->seek(650);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 650u);
+}
+
+/// Constant-delta: seek to first and last doc of arithmetic block.
+TEST(PostingListCursorTest, ArithmeticSeekFirstAndLastOfBlock)
+{
+    auto docs = generateRange(0, 257, 2);  // 0, 2, 4, ..., 512
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Block 1 (arithmetic): docs[129]=258 to docs[256]=512.
+    cursor->seek(258);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 258u);
+
+    /// Re-create cursor, seek to last doc of block 1.
+    auto cursor2 = makeMultiBlockCursor(data);
+    cursor2->seek(512);
+    ASSERT_TRUE(cursor2->valid());
+    EXPECT_EQ(cursor2->value(), 512u);
+
+    cursor2->next();
+    EXPECT_FALSE(cursor2->valid());
+}
+
+/// Seek within arithmetic block then next() transitions to next block.
+TEST(PostingListCursorTest, ArithmeticNextTransitionsToNextBlock)
+{
+    /// 385 consecutive docs → docs_to_encode = 384 → 3 packed blocks of 128.
+    /// Blocks 1 and 2 are zero-delta arithmetic.
+    auto docs = generateRange(0, 385);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Seek to last element of block 1: docs[256]=256.
+    cursor->seek(256);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 256u);
+
+    /// next() should transition to block 2 (also arithmetic).
+    cursor->next();
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 257u);
+}
+
+/// Mixed: first block is non-arithmetic, second block is arithmetic.
+TEST(PostingListCursorTest, ArithmeticMixedNonArithThenArith)
+{
+    std::vector<uint32_t> docs;
+    docs.push_back(0);  // first_doc_id
+
+    /// Block 0: 128 docs with variable gaps (non-constant delta).
+    uint32_t prev = 0;
+    std::mt19937 rng(42);
+    for (int i = 0; i < 128; ++i)
+    {
+        prev += 1 + (rng() % 5);  // gap 1-5 (variable → non-constant delta)
+        docs.push_back(prev);
+    }
+
+    /// Block 1: 128 consecutive docs after prev (step=1 → zero-delta).
+    for (int i = 0; i < 128; ++i)
+    {
+        ++prev;
+        docs.push_back(prev);
+    }
+
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto all = seekAndDrainCursor(cursor, 0);
+    EXPECT_EQ(all, docs);
+}
+
+/// Seek across a mixed sequence: seek from non-arithmetic block into arithmetic block.
+TEST(PostingListCursorTest, ArithmeticSeekFromNonArithToArith)
+{
+    std::vector<uint32_t> docs;
+    docs.push_back(0);
+
+    uint32_t prev = 0;
+    std::mt19937 rng(123);
+    for (int i = 0; i < 128; ++i)
+    {
+        prev += 1 + (rng() % 10);
+        docs.push_back(prev);
+    }
+
+    /// Block 1: 128 docs with step=1 starting from prev+1.
+    uint32_t block1_start = prev + 1;
+    for (int i = 0; i < 128; ++i)
+        docs.push_back(block1_start + static_cast<uint32_t>(i));
+
+    auto data = makeMultiBlockData({docs});
+
+    /// Seek from block 0 into block 1.
+    auto cursor = makeMultiBlockCursor(data);
+    cursor->seek(block1_start + 50);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), block1_start + 50);
+}
+
+/// Tail block (< 128 elements) that is arithmetic.
+TEST(PostingListCursorTest, ArithmeticTailBlock)
+{
+    /// 179 docs consecutive → docs_to_encode=178 → packed block 0 (128) + tail block (50, zero-delta arithmetic).
+    auto docs = generateRange(0, 179);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Seek into the tail block.
+    cursor->seek(140);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 140u);
+
+    auto remaining = drainCursor(cursor);
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 140; d <= 178; ++d)
+        expected.push_back(d);
+    EXPECT_EQ(remaining, expected);
+}
+
+/// Tail block with constant delta > 1.
+TEST(PostingListCursorTest, ArithmeticTailBlockConstantDelta)
+{
+    /// 179 docs with step 4.
+    auto docs = generateRange(0, 179, 4);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Tail block starts at docs[129] = 129 * 4 = 516.
+    cursor->seek(516);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 516u);
+
+    /// Seek to non-exact value in tail.
+    auto cursor2 = makeMultiBlockCursor(data);
+    cursor2->seek(520);
+    ASSERT_TRUE(cursor2->valid());
+    EXPECT_EQ(cursor2->value(), 520u);
+
+    auto cursor3 = makeMultiBlockCursor(data);
+    cursor3->seek(519);
+    ASSERT_TRUE(cursor3->valid());
+    EXPECT_EQ(cursor3->value(), 520u);
+}
+
+/// Block 0 of large block 0 is NOT arithmetic (prepend_first_doc_id).
+/// Verify that the optimization does not apply to it.
+TEST(PostingListCursorTest, ArithmeticBlock0NotOptimized)
+{
+    /// 129 consecutive docs: docs_to_encode has 128 (one full packed block).
+    /// This packed block 0 has prepend_first_doc_id, so it should NOT be arithmetic.
+    auto docs = generateRange(0, 129);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Should still work correctly — full decode path.
+    auto all = seekAndDrainCursor(cursor, 0);
+    EXPECT_EQ(all, docs);
+}
+
+/// Intersection (leapfrog) with arithmetic blocks.
+TEST(PostingListCursorTest, ArithmeticIntersectTwoLeapfrog)
+{
+    /// Cursor A: 257 consecutive docs [0..256], block 1 is arithmetic.
+    auto docsA = generateRange(0, 257);
+    auto dataA = makeMultiBlockData({docsA});
+
+    /// Cursor B: 257 docs with step 2 [0, 2, 4, ..., 512], block 1 is arithmetic.
+    auto docsB = generateRange(0, 257, 2);
+    auto dataB = makeMultiBlockData({docsB});
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeMultiBlockCursor(dataB);
+    auto result = intersectAndCollect(postings, {"a", "b"}, 0, 520, false, 100.0);
+
+    /// Intersection: even numbers from 0 to 256.
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 0; d <= 256; d += 2)
+        expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+/// Intersection (brute force) with arithmetic blocks.
+TEST(PostingListCursorTest, ArithmeticIntersectTwoBruteForce)
+{
+    auto docsA = generateRange(0, 257);
+    auto dataA = makeMultiBlockData({docsA});
+
+    auto docsB = generateRange(0, 257, 2);
+    auto dataB = makeMultiBlockData({docsB});
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeMultiBlockCursor(dataB);
+    auto result = intersectAndCollect(postings, {"a", "b"}, 0, 520, true);
+
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 0; d <= 256; d += 2)
+        expected.push_back(d);
+    EXPECT_EQ(result, expected);
+}
+
+/// Union with arithmetic blocks.
+TEST(PostingListCursorTest, ArithmeticUnionTwo)
+{
+    auto docsA = generateRange(0, 257);
+    auto dataA = makeMultiBlockData({docsA});
+
+    auto docsB = generateRange(300, 130, 2);  // 300, 302, ..., 558
+    auto dataB = makeMultiBlockData({docsB});
+
+    PostingListCursorMap postings;
+    postings["a"] = makeMultiBlockCursor(dataA);
+    postings["b"] = makeMultiBlockCursor(dataB);
+    auto result = unionAndCollect(postings, {"a", "b"}, 0, 600);
+
+    /// Build expected: union of both sets.
+    std::set<uint32_t> expected_set(docsA.begin(), docsA.end());
+    expected_set.insert(docsB.begin(), docsB.end());
+    std::vector<uint32_t> expected(expected_set.begin(), expected_set.end());
+    EXPECT_EQ(result, expected);
+}
+
+/// Multiple packed blocks, all arithmetic (zero-delta), drain through all.
+TEST(PostingListCursorTest, ArithmeticMultipleBlocksAllZeroDelta)
+{
+    /// 513 consecutive docs → docs_to_encode has 512 → 4 packed blocks of 128,
+    /// blocks 1,2,3 are all zero-delta arithmetic.
+    auto docs = generateRange(0, 513);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto all = seekAndDrainCursor(cursor, 0);
+    EXPECT_EQ(all, docs);
+}
+
+/// Multiple packed blocks, all arithmetic, linearOr.
+TEST(PostingListCursorTest, ArithmeticMultipleBlocksLinearOr)
+{
+    auto docs = generateRange(0, 513);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 0, 520);
+    EXPECT_EQ(result, docs);
+}
+
+/// Seek to every doc_id in an arithmetic block to verify correctness.
+TEST(PostingListCursorTest, ArithmeticSeekEveryDocInBlock)
+{
+    auto docs = generateRange(0, 257, 3);
+    auto data = makeMultiBlockData({docs});
+
+    /// Block 1 contains docs[129]=387 to docs[256]=768.
+    for (uint32_t target = 387; target <= 768; target += 3)
+    {
+        auto cursor = makeMultiBlockCursor(data);
+        cursor->seek(target);
+        ASSERT_TRUE(cursor->valid()) << "target=" << target;
+        EXPECT_EQ(cursor->value(), target) << "target=" << target;
+    }
+}
+
+/// Seek to values between arithmetic doc_ids (non-exact).
+TEST(PostingListCursorTest, ArithmeticSeekBetweenDocs)
+{
+    auto docs = generateRange(0, 257, 5);  // 0, 5, 10, ..., 1280
+    auto data = makeMultiBlockData({docs});
+
+    /// Block 1 starts at docs[129] = 645.
+    for (uint32_t target = 646; target <= 660; ++target)
+    {
+        if (target % 5 == 0) continue;  // skip exact matches
+        auto cursor = makeMultiBlockCursor(data);
+        cursor->seek(target);
+        ASSERT_TRUE(cursor->valid()) << "target=" << target;
+        /// Should land on the next multiple of 5 >= target.
+        uint32_t expected_val = ((target + 4) / 5) * 5;
+        EXPECT_EQ(cursor->value(), expected_val) << "target=" << target;
+    }
+}
+
+/// Seek beyond the last doc of an arithmetic block.
+TEST(PostingListCursorTest, ArithmeticSeekBeyondBlock)
+{
+    auto docs = generateRange(0, 257);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    cursor->seek(300);
+    EXPECT_FALSE(cursor->valid());
+}
+
+/// Brute force vs leapfrog consistency with arithmetic blocks.
+TEST(PostingListCursorTest, ArithmeticBruteForceVsLeapfrogConsistency)
+{
+    auto docsA = generateRange(0, 385);
+    auto dataA = makeMultiBlockData({docsA});
+
+    auto docsB = generateRange(0, 257, 2);
+    auto dataB = makeMultiBlockData({docsB});
+
+    auto docsC = generateRange(100, 200);
+    auto dataC = makeMultiBlockData({docsC});
+
+    PostingListCursorMap postings_bf;
+    postings_bf["a"] = makeMultiBlockCursor(dataA);
+    postings_bf["b"] = makeMultiBlockCursor(dataB);
+    postings_bf["c"] = makeMultiBlockCursor(dataC);
+    auto bf = intersectAndCollect(postings_bf, {"a", "b", "c"}, 0, 520, true);
+
+    PostingListCursorMap postings_lf;
+    postings_lf["a"] = makeMultiBlockCursor(dataA);
+    postings_lf["b"] = makeMultiBlockCursor(dataB);
+    postings_lf["c"] = makeMultiBlockCursor(dataC);
+    auto lf = intersectAndCollect(postings_lf, {"a", "b", "c"}, 0, 520, false, 100.0);
+
+    EXPECT_EQ(bf, lf);
+}
+
+/// Two large blocks where the second large block has arithmetic blocks.
+TEST(PostingListCursorTest, ArithmeticSecondLargeBlock)
+{
+    auto block0 = generateRange(0, 150);     // 1 packed block + 22 tail
+    auto block1 = generateRange(200, 257);   // 2 packed blocks, block 1 is arithmetic
+
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Seek into the arithmetic block of the second large block.
+    /// block1 docs_to_encode starts from docs[0]=200 with delta_base=199.
+    /// Packed block 0 of large block 1: docs[0..127] = 200..327.
+    /// Packed block 1 of large block 1: docs[128..256] = 328..456 — arithmetic.
+    cursor->seek(350);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 350u);
+
+    auto remaining = drainCursor(cursor);
+    std::vector<uint32_t> expected;
+    for (uint32_t d = 350; d <= 456; ++d)
+        expected.push_back(d);
+    EXPECT_EQ(remaining, expected);
+}
+
+/// linearOr spanning two large blocks, second has arithmetic blocks.
+TEST(PostingListCursorTest, ArithmeticSecondLargeBlockLinearOr)
+{
+    auto block0 = generateRange(0, 150);
+    auto block1 = generateRange(200, 257);
+
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 0, 460);
+
+    std::set<uint32_t> expected_set;
+    for (auto d : block0) expected_set.insert(d);
+    for (auto d : block1) expected_set.insert(d);
+    std::vector<uint32_t> expected(expected_set.begin(), expected_set.end());
+    EXPECT_EQ(result, expected);
+}
+
+/// Large constant-delta value (step=100).
+TEST(PostingListCursorTest, ArithmeticLargeStep)
+{
+    auto docs = generateRange(0, 257, 100);  // 0, 100, 200, ..., 25600
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto all = seekAndDrainCursor(cursor, 0);
+    EXPECT_EQ(all, docs);
+
+    /// linearOr
+    auto cursor2 = makeMultiBlockCursor(data);
+    auto result = linearOrToDocIds(cursor2, 0, 25700);
+    EXPECT_EQ(result, docs);
+}
+
+/// Seek repeatedly within the same arithmetic block (cache hit path).
+TEST(PostingListCursorTest, ArithmeticRepeatedSeekSameBlock)
+{
+    auto docs = generateRange(0, 257);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    /// Seek multiple times within block 1 (arithmetic).
+    cursor->seek(130);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 130u);
+
+    cursor->seek(150);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 150u);
+
+    cursor->seek(200);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 200u);
+
+    cursor->seek(256);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 256u);
 }
