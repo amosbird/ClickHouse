@@ -408,7 +408,7 @@ TEST(PostingListCursorTest, MultipleDocsSequentialIteration)
 
 TEST(PostingListCursorTest, LargeEmbeddedCursor)
 {
-    auto docs = generateRange(0, 1000);
+    auto docs = generateRange(0, 6);
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
@@ -418,7 +418,7 @@ TEST(PostingListCursorTest, LargeEmbeddedCursor)
 
 TEST(PostingListCursorTest, SparseEmbeddedCursor)
 {
-    auto docs = generateRange(100, 50, 100); // 100,200,...,5000
+    auto docs = generateRange(100, 5, 100); // 100,200,300,400,500
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
@@ -524,7 +524,7 @@ TEST(PostingListCursorTest, SeekBeforeFirst)
 
 TEST(PostingListCursorTest, SeekProgressivelyForward)
 {
-    std::vector<uint32_t> docs = {10, 20, 30, 40, 50, 60, 70, 80, 90, 100};
+    std::vector<uint32_t> docs = {10, 20, 30, 40, 50, 60};
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
@@ -536,11 +536,7 @@ TEST(PostingListCursorTest, SeekProgressivelyForward)
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 60u);
 
-    cursor->seek(100);
-    ASSERT_TRUE(cursor->valid());
-    EXPECT_EQ(cursor->value(), 100u);
-
-    cursor->seek(101);
+    cursor->seek(61);
     EXPECT_FALSE(cursor->valid());
 }
 
@@ -577,7 +573,7 @@ TEST(PostingListCursorTest, CardinalityReflectsDocCount)
 
 TEST(PostingListCursorTest, DensityPerfectlyDense)
 {
-    auto docs = generateRange(0, 100);
+    auto docs = generateRange(0, 5);
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
     EXPECT_DOUBLE_EQ(cursor->density(), 1.0);
@@ -646,11 +642,11 @@ TEST(PostingListCursorTest, LinearOrSingleRowMatch)
 
 TEST(PostingListCursorTest, LinearOrDenseRange)
 {
-    auto docs = generateRange(100, 500);
+    auto docs = generateRange(100, 6);
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
-    auto result = linearOrToDocIds(cursor, 0, 700);
+    auto result = linearOrToDocIds(cursor, 0, 110);
     EXPECT_EQ(result, docs);
 }
 
@@ -747,14 +743,12 @@ TEST(PostingListCursorTest, IntersectTwoDenseVsSparse)
     auto dense_docs = generateRange(0, 1000);
     auto sparse_docs = generateRange(0, 100, 10); // 0,10,20,...,990
 
-    auto info1 = makeEmbeddedInfo(dense_docs);
-    auto info2 = makeEmbeddedInfo(sparse_docs);
-    auto c1 = makeEmbeddedCursor(info1);
-    auto c2 = makeEmbeddedCursor(info2);
+    auto dataD = makeMultiBlockData({dense_docs});
+    auto dataS = makeMultiBlockData({sparse_docs});
 
     PostingListCursorMap postings;
-    postings["dense"] = c1;
-    postings["sparse"] = c2;
+    postings["dense"] = makeMultiBlockCursor(dataD);
+    postings["sparse"] = makeMultiBlockCursor(dataS);
 
     auto result = intersectAndCollect(postings, {"dense", "sparse"}, 0, 1000, false, 100.0);
     EXPECT_EQ(result, sparse_docs);
@@ -834,7 +828,7 @@ TEST(PostingListCursorTest, IntersectThreeNoCommon)
 
 TEST(PostingListCursorTest, IntersectFourAllOverlap)
 {
-    auto docs = generateRange(0, 20, 5);
+    auto docs = generateRange(0, 5, 10); // 0,10,20,30,40
     auto info1 = makeEmbeddedInfo(docs);
     auto info2 = makeEmbeddedInfo(docs);
     auto info3 = makeEmbeddedInfo(docs);
@@ -846,7 +840,7 @@ TEST(PostingListCursorTest, IntersectFourAllOverlap)
     postings["c"] = makeEmbeddedCursor(info3);
     postings["d"] = makeEmbeddedCursor(info4);
 
-    auto result = intersectAndCollect(postings, {"a", "b", "c", "d"}, 0, 100, false, 100.0);
+    auto result = intersectAndCollect(postings, {"a", "b", "c", "d"}, 0, 50, false, 100.0);
     EXPECT_EQ(result, docs);
 }
 
@@ -861,16 +855,16 @@ TEST(PostingListCursorTest, IntersectFourMixedSelectivity)
     // Sparsest: every 7th
     auto docs4 = generateRange(0, 143, 7);
 
-    auto info1 = makeEmbeddedInfo(docs1);
-    auto info2 = makeEmbeddedInfo(docs2);
-    auto info3 = makeEmbeddedInfo(docs3);
-    auto info4 = makeEmbeddedInfo(docs4);
+    auto data1 = makeMultiBlockData({docs1});
+    auto data2 = makeMultiBlockData({docs2});
+    auto data3 = makeMultiBlockData({docs3});
+    auto data4 = makeMultiBlockData({docs4});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
-    postings["c"] = makeEmbeddedCursor(info3);
-    postings["d"] = makeEmbeddedCursor(info4);
+    postings["a"] = makeMultiBlockCursor(data1);
+    postings["b"] = makeMultiBlockCursor(data2);
+    postings["c"] = makeMultiBlockCursor(data3);
+    postings["d"] = makeMultiBlockCursor(data4);
 
     auto result = intersectAndCollect(postings, {"a", "b", "c", "d"}, 0, 1000, false, 100.0);
 
@@ -895,18 +889,18 @@ TEST(PostingListCursorTest, IntersectFiveCursors)
     auto docs4 = generateRange(0, 143, 7);
     auto docs5 = generateRange(0, 91, 11);
 
-    auto info1 = makeEmbeddedInfo(docs1);
-    auto info2 = makeEmbeddedInfo(docs2);
-    auto info3 = makeEmbeddedInfo(docs3);
-    auto info4 = makeEmbeddedInfo(docs4);
-    auto info5 = makeEmbeddedInfo(docs5);
+    auto data1 = makeMultiBlockData({docs1});
+    auto data2 = makeMultiBlockData({docs2});
+    auto data3 = makeMultiBlockData({docs3});
+    auto data4 = makeMultiBlockData({docs4});
+    auto data5 = makeMultiBlockData({docs5});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
-    postings["c"] = makeEmbeddedCursor(info3);
-    postings["d"] = makeEmbeddedCursor(info4);
-    postings["e"] = makeEmbeddedCursor(info5);
+    postings["a"] = makeMultiBlockCursor(data1);
+    postings["b"] = makeMultiBlockCursor(data2);
+    postings["c"] = makeMultiBlockCursor(data3);
+    postings["d"] = makeMultiBlockCursor(data4);
+    postings["e"] = makeMultiBlockCursor(data5);
 
     auto result = intersectAndCollect(postings, {"a", "b", "c", "d", "e"}, 0, 1000, false, 100.0);
     // Only 0 is common (LCM=2310, next would be 2310 which is >= 1000)
@@ -915,21 +909,21 @@ TEST(PostingListCursorTest, IntersectFiveCursors)
 
 TEST(PostingListCursorTest, IntersectEightCursors)
 {
-    auto docs = generateRange(0, 10, 10); // 0,10,...,90
-    std::vector<TokenPostingsInfo> infos(8);
+    auto docs = generateRange(0, 6, 10); // 0,10,20,30,40,50
+    std::vector<MultiBlockTestData> datas(8);
     PostingListCursorMap postings;
     std::vector<String> tokens;
 
     for (int i = 0; i < 8; ++i)
     {
-        infos[i] = makeEmbeddedInfo(docs);
+        datas[i] = makeMultiBlockData({docs});
         String name = "t" + std::to_string(i);
         tokens.push_back(name);
     }
     for (int i = 0; i < 8; ++i)
-        postings[tokens[i]] = makeEmbeddedCursor(infos[i]);
+        postings[tokens[i]] = makeMultiBlockCursor(datas[i]);
 
-    auto result = intersectAndCollect(postings, tokens, 0, 100, false, 100.0);
+    auto result = intersectAndCollect(postings, tokens, 0, 60, false, 100.0);
     EXPECT_EQ(result, docs);
 }
 
@@ -960,7 +954,7 @@ TEST(PostingListCursorTest, IntersectNineCursorsHeap)
 
 TEST(PostingListCursorTest, IntersectTenCursorsWithVaryingDocs)
 {
-    std::vector<TokenPostingsInfo> infos(10);
+    std::vector<MultiBlockTestData> datas(10);
     PostingListCursorMap postings;
     std::vector<String> tokens;
 
@@ -975,8 +969,8 @@ TEST(PostingListCursorTest, IntersectTenCursorsWithVaryingDocs)
         std::vector<uint32_t> docs;
         for (uint32_t d = 0; d < 1000; d += (i + 1))
             docs.push_back(d);
-        infos[i] = makeEmbeddedInfo(docs);
-        postings[tokens[i]] = makeEmbeddedCursor(infos[i]);
+        datas[i] = makeMultiBlockData({docs});
+        postings[tokens[i]] = makeMultiBlockCursor(datas[i]);
     }
 
     auto result = intersectAndCollect(postings, tokens, 0, 1000, false, 100.0);
@@ -1026,7 +1020,7 @@ TEST(PostingListCursorTest, BruteForceVsLeapfrogConsistency)
 
     for (int trial = 0; trial < 10; ++trial)
     {
-        std::vector<TokenPostingsInfo> infos(3);
+        std::vector<MultiBlockTestData> datas(3);
         std::vector<std::vector<uint32_t>> all_docs(3);
 
         for (int i = 0; i < 3; ++i)
@@ -1036,21 +1030,21 @@ TEST(PostingListCursorTest, BruteForceVsLeapfrogConsistency)
             while (s.size() < count)
                 s.insert(dist(rng));
             all_docs[i].assign(s.begin(), s.end());
-            infos[i] = makeEmbeddedInfo(all_docs[i]);
+            datas[i] = makeMultiBlockData({all_docs[i]});
         }
 
         // Brute force
         PostingListCursorMap postings_bf;
-        postings_bf["a"] = makeEmbeddedCursor(infos[0]);
-        postings_bf["b"] = makeEmbeddedCursor(infos[1]);
-        postings_bf["c"] = makeEmbeddedCursor(infos[2]);
+        postings_bf["a"] = makeMultiBlockCursor(datas[0]);
+        postings_bf["b"] = makeMultiBlockCursor(datas[1]);
+        postings_bf["c"] = makeMultiBlockCursor(datas[2]);
         auto bf_result = intersectAndCollect(postings_bf, {"a", "b", "c"}, 0, 1000, true);
 
         // Leapfrog (low density threshold to force leapfrog)
         PostingListCursorMap postings_lf;
-        postings_lf["a"] = makeEmbeddedCursor(infos[0]);
-        postings_lf["b"] = makeEmbeddedCursor(infos[1]);
-        postings_lf["c"] = makeEmbeddedCursor(infos[2]);
+        postings_lf["a"] = makeMultiBlockCursor(datas[0]);
+        postings_lf["b"] = makeMultiBlockCursor(datas[1]);
+        postings_lf["c"] = makeMultiBlockCursor(datas[2]);
         auto lf_result = intersectAndCollect(postings_lf, {"a", "b", "c"}, 0, 1000, false, 100.0);
 
         EXPECT_EQ(bf_result, lf_result) << "Brute-force vs leapfrog mismatch at trial " << trial;
@@ -1266,12 +1260,12 @@ TEST(PostingListCursorTest, StressRandomIntersectTwo)
         std::vector<uint32_t> expected;
         std::set_intersection(s1.begin(), s1.end(), s2.begin(), s2.end(), std::back_inserter(expected));
 
-        auto info1 = makeEmbeddedInfo(v1);
-        auto info2 = makeEmbeddedInfo(v2);
+        auto data1 = makeMultiBlockData({v1});
+        auto data2 = makeMultiBlockData({v2});
 
         PostingListCursorMap postings;
-        postings["a"] = makeEmbeddedCursor(info1);
-        postings["b"] = makeEmbeddedCursor(info2);
+        postings["a"] = makeMultiBlockCursor(data1);
+        postings["b"] = makeMultiBlockCursor(data2);
 
         auto result = intersectAndCollect(postings, {"a", "b"}, 0, 10000, false, 100.0);
         EXPECT_EQ(result, expected) << "Mismatch at trial " << trial;
@@ -1287,7 +1281,7 @@ TEST(PostingListCursorTest, StressRandomIntersectFour)
         std::uniform_int_distribution<uint32_t> dist(0, 4999);
 
         std::vector<std::set<uint32_t>> sets(4);
-        std::vector<TokenPostingsInfo> infos(4);
+        std::vector<MultiBlockTestData> datas(4);
         PostingListCursorMap postings;
         std::vector<String> tokens;
 
@@ -1297,13 +1291,13 @@ TEST(PostingListCursorTest, StressRandomIntersectFour)
             while (sets[i].size() < sz) sets[i].insert(dist(rng));
 
             std::vector<uint32_t> v(sets[i].begin(), sets[i].end());
-            infos[i] = makeEmbeddedInfo(v);
+            datas[i] = makeMultiBlockData({v});
 
             String name = "t" + std::to_string(i);
             tokens.push_back(name);
         }
         for (int i = 0; i < 4; ++i)
-            postings[tokens[i]] = makeEmbeddedCursor(infos[i]);
+            postings[tokens[i]] = makeMultiBlockCursor(datas[i]);
 
         // Compute expected 4-way intersection
         std::vector<uint32_t> tmp1, tmp2, expected;
@@ -1325,7 +1319,7 @@ TEST(PostingListCursorTest, StressRandomUnion)
         std::uniform_int_distribution<uint32_t> dist(0, 999);
 
         std::set<uint32_t> all;
-        std::vector<TokenPostingsInfo> infos(3);
+        std::vector<MultiBlockTestData> datas(3);
         PostingListCursorMap postings;
         std::vector<String> tokens;
 
@@ -1337,13 +1331,13 @@ TEST(PostingListCursorTest, StressRandomUnion)
             all.insert(s.begin(), s.end());
 
             std::vector<uint32_t> v(s.begin(), s.end());
-            infos[i] = makeEmbeddedInfo(v);
+            datas[i] = makeMultiBlockData({v});
 
             String name = "t" + std::to_string(i);
             tokens.push_back(name);
         }
         for (int i = 0; i < 3; ++i)
-            postings[tokens[i]] = makeEmbeddedCursor(infos[i]);
+            postings[tokens[i]] = makeMultiBlockCursor(datas[i]);
 
         std::vector<uint32_t> expected(all.begin(), all.end());
         auto result = unionAndCollect(postings, tokens, 0, 1000);
@@ -1359,13 +1353,14 @@ TEST(PostingListCursorTest, StressRandomUnion)
 TEST(PostingListCursorTest, IntersectOneCursorEndsEarly)
 {
     auto info1 = makeEmbeddedInfo({10, 20, 30});
-    auto info2 = makeEmbeddedInfo({10, 20, 30, 40, 50, 60, 70, 80, 90, 100});
+    auto docs2 = generateRange(10, 6, 10); // 10,20,30,40,50,60
+    auto info2 = makeEmbeddedInfo(docs2);
 
     PostingListCursorMap postings;
     postings["short"] = makeEmbeddedCursor(info1);
     postings["long"] = makeEmbeddedCursor(info2);
 
-    auto result = intersectAndCollect(postings, {"short", "long"}, 0, 110, false, 100.0);
+    auto result = intersectAndCollect(postings, {"short", "long"}, 0, 70, false, 100.0);
     std::vector<uint32_t> expected = {10, 20, 30};
     EXPECT_EQ(result, expected);
 }
@@ -1409,12 +1404,12 @@ TEST(PostingListCursorTest, BruteForceDenseLargeRange)
     auto docs1 = generateRange(0, 5000);
     auto docs2 = generateRange(0, 2500, 2); // 0,2,4,...,4998
 
-    auto info1 = makeEmbeddedInfo(docs1);
-    auto info2 = makeEmbeddedInfo(docs2);
+    auto data1 = makeMultiBlockData({docs1});
+    auto data2 = makeMultiBlockData({docs2});
 
     PostingListCursorMap postings;
-    postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
+    postings["a"] = makeMultiBlockCursor(data1);
+    postings["b"] = makeMultiBlockCursor(data2);
 
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, 5000, true);
     EXPECT_EQ(result, docs2);
@@ -1427,7 +1422,7 @@ TEST(PostingListCursorTest, BruteForceDenseLargeRange)
 
 TEST(PostingListCursorTest, AlternatingSeekAndNext)
 {
-    auto docs = generateRange(0, 100, 3); // 0,3,6,...,297
+    auto docs = generateRange(0, 6, 3); // 0,3,6,9,12,15
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
@@ -1435,7 +1430,17 @@ TEST(PostingListCursorTest, AlternatingSeekAndNext)
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 0u);
 
-    // Seek to 10 -> should land on 12 (first multiple of 3 >= 10)
+    // Seek to 2 -> should land on 3 (first multiple of 3 >= 2)
+    cursor->seek(2);
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 3u);
+
+    // next() -> 6
+    cursor->next();
+    ASSERT_TRUE(cursor->valid());
+    EXPECT_EQ(cursor->value(), 6u);
+
+    // Seek to 10 -> should land on 12
     cursor->seek(10);
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 12u);
@@ -1444,31 +1449,6 @@ TEST(PostingListCursorTest, AlternatingSeekAndNext)
     cursor->next();
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 15u);
-
-    // Seek to 100 -> should land on 102
-    cursor->seek(100);
-    ASSERT_TRUE(cursor->valid());
-    EXPECT_EQ(cursor->value(), 102u);
-
-    // next() -> 105
-    cursor->next();
-    ASSERT_TRUE(cursor->valid());
-    EXPECT_EQ(cursor->value(), 105u);
-
-    // Seek way ahead to 290 -> 291
-    cursor->seek(290);
-    ASSERT_TRUE(cursor->valid());
-    EXPECT_EQ(cursor->value(), 291u);
-
-    // next() -> 294
-    cursor->next();
-    ASSERT_TRUE(cursor->valid());
-    EXPECT_EQ(cursor->value(), 294u);
-
-    // next() -> 297
-    cursor->next();
-    ASSERT_TRUE(cursor->valid());
-    EXPECT_EQ(cursor->value(), 297u);
 
     // next() -> invalid
     cursor->next();
@@ -1487,7 +1467,7 @@ TEST(PostingListCursorTest, AlternatingSeekAndNext)
 /// all elements.
 TEST(PostingListCursorTest, NextExhaustsAllElementsProperly)
 {
-    auto docs = generateRange(0, 500);
+    auto docs = generateRange(0, 6);
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
@@ -1498,7 +1478,7 @@ TEST(PostingListCursorTest, NextExhaustsAllElementsProperly)
         cursor->next();
         ++count;
     }
-    EXPECT_EQ(count, 500u);
+    EXPECT_EQ(count, 6u);
 }
 
 /// The seek() bug: seek on the slow path should start from the next large block,
@@ -1536,14 +1516,14 @@ TEST(PostingListCursorTest, DensityThresholdSwitchesAlgorithm)
     // Two dense cursors: density ~= 1.0
     auto docs1 = generateRange(0, 100);
     auto docs2 = generateRange(0, 100);
-    auto info1 = makeEmbeddedInfo(docs1);
-    auto info2 = makeEmbeddedInfo(docs2);
+    auto data1 = makeMultiBlockData({docs1});
+    auto data2 = makeMultiBlockData({docs2});
 
     // With high threshold → leapfrog
     {
         PostingListCursorMap postings;
-        postings["a"] = makeEmbeddedCursor(info1);
-        postings["b"] = makeEmbeddedCursor(info2);
+        postings["a"] = makeMultiBlockCursor(data1);
+        postings["b"] = makeMultiBlockCursor(data2);
         auto result = intersectAndCollect(postings, {"a", "b"}, 0, 100, false, 100.0);
         EXPECT_EQ(result, docs1);
     }
@@ -1551,8 +1531,8 @@ TEST(PostingListCursorTest, DensityThresholdSwitchesAlgorithm)
     // With low threshold → brute-force (density 1.0 >= 0.1)
     {
         PostingListCursorMap postings;
-        postings["a"] = makeEmbeddedCursor(info1);
-        postings["b"] = makeEmbeddedCursor(info2);
+        postings["a"] = makeMultiBlockCursor(data1);
+        postings["b"] = makeMultiBlockCursor(data2);
         auto result = intersectAndCollect(postings, {"a", "b"}, 0, 100, false, 0.1f);
         EXPECT_EQ(result, docs1);
     }
@@ -1569,11 +1549,11 @@ TEST(PostingListCursorTest, HighlyAsymmetricCardinalities)
     auto info1 = makeEmbeddedInfo({500});
     // Cursor B: 5000 docs
     auto docs2 = generateRange(0, 5000);
-    auto info2 = makeEmbeddedInfo(docs2);
+    auto data2 = makeMultiBlockData({docs2});
 
     PostingListCursorMap postings;
     postings["a"] = makeEmbeddedCursor(info1);
-    postings["b"] = makeEmbeddedCursor(info2);
+    postings["b"] = makeMultiBlockCursor(data2);
 
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, 5000, false, 100.0);
     EXPECT_EQ(result, std::vector<uint32_t>{500});
@@ -1583,11 +1563,11 @@ TEST(PostingListCursorTest, OneEmptyOneFullIntersection)
 {
     auto info1 = makeEmbeddedInfo({});
     auto docs2 = generateRange(0, 100);
-    auto info2 = makeEmbeddedInfo(docs2);
+    auto data2 = makeMultiBlockData({docs2});
 
     PostingListCursorMap postings;
     postings["empty"] = makeEmbeddedCursor(info1);
-    postings["full"] = makeEmbeddedCursor(info2);
+    postings["full"] = makeMultiBlockCursor(data2);
 
     // The empty cursor is invalid from the start, so intersect should return empty.
     // But since the cursor is invalid after seek(0), intersect returns immediately.
@@ -1602,14 +1582,14 @@ TEST(PostingListCursorTest, OneEmptyOneFullIntersection)
 
 TEST(PostingListCursorTest, ConsecutiveDocIds)
 {
-    auto docs = generateRange(1000, 200);
+    auto docs = generateRange(1000, 6);
     auto info = makeEmbeddedInfo(docs);
     auto cursor = makeEmbeddedCursor(info);
 
     auto result = drainCursor(cursor);
-    EXPECT_EQ(result.size(), 200u);
+    EXPECT_EQ(result.size(), 6u);
     EXPECT_EQ(result.front(), 1000u);
-    EXPECT_EQ(result.back(), 1199u);
+    EXPECT_EQ(result.back(), 1005u);
 }
 
 
@@ -2717,12 +2697,11 @@ TEST(PostingListCursorTest, MultiBlockWithEmbeddedBruteForceIntersect)
     /// Embedded cursor B: all even numbers 0,2,4,...,698
     /// Brute-force intersection: even numbers in [0..199] ∪ even numbers in [500..699]
     auto dataA = makeMultiBlockData({generateRange(0, 200), generateRange(500, 200)});
-    auto docsB = generateRange(0, 350, 2); // 0,2,4,...,698
-    auto infoB = makeEmbeddedInfo(docsB);
+    auto dataB = makeMultiBlockData({generateRange(0, 350, 2)}); // 0,2,4,...,698
 
     PostingListCursorMap postings;
     postings["a"] = makeMultiBlockCursor(dataA);
-    postings["b"] = makeEmbeddedCursor(infoB);
+    postings["b"] = makeMultiBlockCursor(dataB);
 
     auto result = intersectAndCollect(postings, {"a", "b"}, 0, 700, true);
 
@@ -2737,13 +2716,12 @@ TEST(PostingListCursorTest, MultiBlockWithEmbeddedBruteForceThreeWay)
     /// 3-way brute-force: multi-block A, multi-block B, embedded C.
     auto dataA = makeMultiBlockData({generateRange(0, 300)});
     auto dataB = makeMultiBlockData({generateRange(100, 300)});
-    auto docsC = generateRange(150, 50); // 150..199
-    auto infoC = makeEmbeddedInfo(docsC);
+    auto dataC = makeMultiBlockData({generateRange(150, 50)}); // 150..199
 
     PostingListCursorMap postings;
     postings["a"] = makeMultiBlockCursor(dataA);
     postings["b"] = makeMultiBlockCursor(dataB);
-    postings["c"] = makeEmbeddedCursor(infoC);
+    postings["c"] = makeMultiBlockCursor(dataC);
 
     auto result = intersectAndCollect(postings, {"a", "b", "c"}, 0, 500, true);
 
