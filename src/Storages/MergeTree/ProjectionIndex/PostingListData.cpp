@@ -5,6 +5,7 @@
 #include <Storages/MergeTree/MergeTreeDataPartWriterOnDisk.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergedPartOffsets.h>
+#include <Storages/MergeTree/ProjectionIndex/LengthPrefixedInt.h>
 #include <Storages/MergeTree/ProjectionIndex/PostingListState.h>
 #include <base/scope_guard.h>
 #include <Common/Arena.h>
@@ -17,222 +18,12 @@ namespace DB
 
 namespace ErrorCodes
 {
-    extern const int ATTEMPT_TO_READ_AFTER_EOF;
     extern const int INCORRECT_DATA;
     extern const int LOGICAL_ERROR;
 }
 
-namespace VarInt
-{
-
-void throwReadAfterEOF()
-{
-    throw Exception(ErrorCodes::ATTEMPT_TO_READ_AFTER_EOF, "Attempt to read after eof");
-}
-
-/// Prefix-Based Variable-Length Integer Encoding (Prefix VarInt).
-///
-/// This encoding is a variation of the "Length-Descriptor" VarInt,
-/// originating from the SQLite 4 design and widely utilized in systems
-/// like ClickHouse for high-performance serialization.
-///
-/// ### Key Advantages:
-/// 1. **Instruction-Level Parallelism (ILP)**: Unlike LEB128 (Protobuf) which
-///    has a serial data dependency on the continuation bit, this format
-///    determines the total length solely from the first byte. This allows
-///    the CPU to load and process payload bytes in parallel.
-/// 2. **Branch-Prediction Friendly**: The implementation is loop-less and
-///    unrolled, reducing CPU pipeline stalls during decoding.
-/// 3. **Lexicographical Comparison**: The big-endian-like prefix structure
-///    is designed to be more compatible with memcmp-based sorting and indexing
-///    compared to little-endian VarInts.
-///
-/// ### Encoding Thresholds:
-/// - [0 - 176]        : 1 byte  (Value = B0)
-/// - [177 - 16560]    : 2 bytes (Value = (B0-177) * 256 + B1 + 177)
-/// - [16561 - 540848] : 3 bytes (Value = (B0-241) * 65536 + (B1<<8) + B2 + 16561)
-/// - [540849 - 2^24-1]: 4 bytes (Marker 249 + 3 bytes raw payload)
-/// - [Up to 2^32-1]   : 5 bytes (Marker 250 + 4 bytes raw payload)
-
-/// Encoding thresholds
-static constexpr UInt32 ONE_BYTE_MAX = 176;
-static constexpr UInt32 TWO_BYTE_MAX = 16560;
-static constexpr UInt32 THREE_BYTE_MAX = 540848;
-static constexpr UInt32 FOUR_BYTE_MAX = 16777215;  /// 2^24 - 1
-
-/// Marker byte boundaries
-static constexpr UInt8 TWO_BYTE_MARKER_START = 177;
-static constexpr UInt8 TWO_BYTE_MARKER_END = 240;
-static constexpr UInt8 THREE_BYTE_MARKER_START = 241;
-static constexpr UInt8 THREE_BYTE_MARKER_END = 248;
-static constexpr UInt8 FOUR_BYTE_MARKER = 249;
-static constexpr UInt8 FIVE_BYTE_MARKER = 250;
-
-/// Offsets for compact encodings (1-3 bytes only)
-static constexpr UInt32 TWO_BYTE_OFFSET = 177;
-static constexpr UInt32 THREE_BYTE_OFFSET = 16561;
-
-template <bool check_eof>
-inline void readVarUInt32Impl(UInt32 & x, ReadBuffer & istr)
-{
-    if constexpr (check_eof)
-        if (istr.eof()) [[unlikely]]
-            throwReadAfterEOF();
-
-    const UInt8 first_byte = *istr.position()++;
-
-    if (first_byte <= ONE_BYTE_MAX)
-    {
-        x = first_byte;
-        return;
-    }
-
-    if constexpr (check_eof)
-        if (istr.eof()) [[unlikely]]
-            throwReadAfterEOF();
-
-    const UInt8 second_byte = *istr.position()++;
-
-    if (first_byte <= TWO_BYTE_MARKER_END)
-    {
-        x = ((first_byte - TWO_BYTE_MARKER_START) << 8) + second_byte + TWO_BYTE_OFFSET;
-        return;
-    }
-
-    if constexpr (check_eof)
-        if (istr.eof()) [[unlikely]]
-            throwReadAfterEOF();
-
-    const UInt8 third_byte = *istr.position()++;
-
-    if (first_byte <= THREE_BYTE_MARKER_END)
-    {
-        x = ((first_byte - THREE_BYTE_MARKER_START) << 16) + (second_byte << 8) + third_byte + THREE_BYTE_OFFSET;
-        return;
-    }
-
-    if constexpr (check_eof)
-        if (istr.eof()) [[unlikely]]
-            throwReadAfterEOF();
-
-    const UInt8 fourth_byte = *istr.position()++;
-
-    if (first_byte == FOUR_BYTE_MARKER)
-    {
-        x = (second_byte << 16) | (third_byte << 8) | fourth_byte;
-        return;
-    }
-
-    if constexpr (check_eof)
-        if (istr.eof()) [[unlikely]]
-            throwReadAfterEOF();
-
-    const UInt8 fifth_byte = *istr.position()++;
-    x = (UInt32(second_byte) << 24) | (UInt32(third_byte) << 16) | (UInt32(fourth_byte) << 8) | fifth_byte;
-}
-
-template <bool check_eof>
-inline void writeVarUInt32Impl(UInt32 x, WriteBuffer & ostr)
-{
-    if (x <= ONE_BYTE_MAX)
-    {
-        if constexpr (check_eof)
-            ostr.nextIfAtEnd();
-        *ostr.position()++ = static_cast<UInt8>(x);
-        return;
-    }
-
-    if (x <= TWO_BYTE_MAX)
-    {
-        const UInt32 adjusted = x - TWO_BYTE_OFFSET;
-        if constexpr (check_eof)
-            ostr.nextIfAtEnd();
-        *ostr.position()++ = static_cast<UInt8>(TWO_BYTE_MARKER_START + (adjusted >> 8));
-        if constexpr (check_eof)
-            ostr.nextIfAtEnd();
-        *ostr.position()++ = static_cast<UInt8>(adjusted & 0xFF);
-        return;
-    }
-
-    if (x <= THREE_BYTE_MAX)
-    {
-        const UInt32 adjusted = x - THREE_BYTE_OFFSET;
-        if constexpr (check_eof)
-            ostr.nextIfAtEnd();
-        *ostr.position()++ = static_cast<UInt8>(THREE_BYTE_MARKER_START + (adjusted >> 16));
-        if constexpr (check_eof)
-            ostr.nextIfAtEnd();
-        *ostr.position()++ = static_cast<UInt8>((adjusted >> 8) & 0xFF);
-        if constexpr (check_eof)
-            ostr.nextIfAtEnd();
-        *ostr.position()++ = static_cast<UInt8>(adjusted & 0xFF);
-        return;
-    }
-
-    if (x <= FOUR_BYTE_MAX)
-    {
-        if constexpr (check_eof)
-            ostr.nextIfAtEnd();
-        *ostr.position()++ = FOUR_BYTE_MARKER;
-        if constexpr (check_eof)
-            ostr.nextIfAtEnd();
-        *ostr.position()++ = static_cast<UInt8>((x >> 16) & 0xFF);
-        if constexpr (check_eof)
-            ostr.nextIfAtEnd();
-        *ostr.position()++ = static_cast<UInt8>((x >> 8) & 0xFF);
-        if constexpr (check_eof)
-            ostr.nextIfAtEnd();
-        *ostr.position()++ = static_cast<UInt8>(x & 0xFF);
-        return;
-    }
-
-    if constexpr (check_eof)
-        ostr.nextIfAtEnd();
-    *ostr.position()++ = FIVE_BYTE_MARKER;
-    if constexpr (check_eof)
-        ostr.nextIfAtEnd();
-    *ostr.position()++ = static_cast<UInt8>((x >> 24) & 0xFF);
-    if constexpr (check_eof)
-        ostr.nextIfAtEnd();
-    *ostr.position()++ = static_cast<UInt8>((x >> 16) & 0xFF);
-    if constexpr (check_eof)
-        ostr.nextIfAtEnd();
-    *ostr.position()++ = static_cast<UInt8>((x >> 8) & 0xFF);
-    if constexpr (check_eof)
-        ostr.nextIfAtEnd();
-    *ostr.position()++ = static_cast<UInt8>(x & 0xFF);
-}
-
-inline void readVarUInt32(UInt32 & x, ReadBuffer & istr)
-{
-    if (istr.available() >= 5)
-        readVarUInt32Impl<false>(x, istr);
-    else
-        readVarUInt32Impl<true>(x, istr);
-}
-
-inline void writeVarUInt32(UInt32 x, WriteBuffer & ostr)
-{
-    if (ostr.available() >= 5)
-        writeVarUInt32Impl<false>(x, ostr);
-    else
-        writeVarUInt32Impl<true>(x, ostr);
-}
-
-inline size_t getLengthOfVarUInt32(UInt32 x)
-{
-    if (x <= ONE_BYTE_MAX)
-        return 1;
-    if (x <= TWO_BYTE_MAX)
-        return 2;
-    if (x <= THREE_BYTE_MAX)
-        return 3;
-    if (x <= FOUR_BYTE_MAX)
-        return 4;
-    return 5;
-}
-
-}
+/// Alias: VarInt functions delegate to the shared LengthPrefixedInt header.
+namespace VarInt = LengthPrefixedInt;
 
 void PostingListChunk::write(WriteBuffer & wb) const
 {
@@ -325,7 +116,7 @@ public:
             packed_block_offsets.push_back(data_out.count());
         }
 
-        VarInt::writeVarUInt32(bytes, data_out);
+        VarInt::writeUInt32(bytes, data_out);
         data_out.write(data, bytes);
 
         /// Always count a packed block as TURBOPFOR_BLOCK_SIZE docs.
@@ -350,7 +141,7 @@ private:
     void flushLargeBlock()
     {
         /// V1/V2 shared: offset_in_lpst always points to Data Section start
-        VarInt::writeVarUInt32(current_block_last_doc_id, meta_out);
+        VarInt::writeUInt32(current_block_last_doc_id, meta_out);
         writeVarUInt(large_block_start_offset, meta_out);
 
         if (write_block_index)
@@ -362,10 +153,10 @@ private:
 
             /// Write Index Section:
             /// [PrefixVarInt: num_packed_blocks]
-            VarInt::writeVarUInt32(num_packed_blocks, data_out);
+            VarInt::writeUInt32(num_packed_blocks, data_out);
             /// N × [PrefixVarInt: last_doc_id]
             for (const auto & id : packed_block_last_doc_ids)
-                VarInt::writeVarUInt32(id, data_out);
+                VarInt::writeUInt32(id, data_out);
             /// N × [VarUInt64: absolute_offset]
             for (const auto & off : packed_block_offsets)
                 writeVarUInt(off, data_out);
@@ -399,11 +190,11 @@ private:
 void PostingListWriter::finish(
     WriteBuffer & wb, WriteBuffer & large_posting, uint8_t * packed_buffer, const MergeTreeIndexTextParams & index_params) const
 {
-    VarInt::writeVarUInt32(doc_count, wb);
+    VarInt::writeUInt32(doc_count, wb);
     if (doc_count == 0)
         return;
 
-    VarInt::writeVarUInt32(first_doc_id, wb);
+    VarInt::writeUInt32(first_doc_id, wb);
 
     /// Single doc: nothing more to write
     if (doc_count == 1)
@@ -415,7 +206,7 @@ void PostingListWriter::finish(
     {
         uint8_t * packed_buffer_end = turbopfor::p4Enc32(doc_delta_buffer, doc_count - 1, packed_buffer);
         UInt32 len = static_cast<UInt32>(packed_buffer_end - packed_buffer);
-        VarInt::writeVarUInt32(len, wb);
+        VarInt::writeUInt32(len, wb);
         wb.write(reinterpret_cast<const char *>(packed_buffer), len);
         return;
     }
@@ -448,7 +239,7 @@ void PostingListWriter::finish(
     const UInt32 num_large_blocks = (large_doc_count + docs_per_large_block - 1) / docs_per_large_block;
 
     chassert(num_large_blocks >= 1);
-    VarInt::writeVarUInt32(num_large_blocks, wb);
+    VarInt::writeUInt32(num_large_blocks, wb);
 
     LargePostingBlockWriter block_writer(wb, large_posting, docs_per_large_block,
         postingListFormatHasBlockIndex(resolvePostingListFormatVersion(index_params.posting_list_version)));
@@ -699,7 +490,7 @@ private:
 
         auto & data_buf = *stream->getDataBuffer();
         UInt32 bytes;
-        VarInt::readVarUInt32(bytes, data_buf);
+        VarInt::readUInt32(bytes, data_buf);
         UInt32 count = std::min(remaining_count, static_cast<UInt32>(TURBOPFOR_BLOCK_SIZE));
         uint8_t * src_ptr;
         if (data_buf.available() >= bytes)
@@ -853,13 +644,13 @@ LazyPostingStream::~LazyPostingStream() = default;
 
 void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStreamPtr & stream, const MergeTreeIndexTextParams & index_params, size_t format_version)
 {
-    VarInt::readVarUInt32(doc_count, in);
+    VarInt::readUInt32(doc_count, in);
     if (doc_count == 0)
         return;
 
     /// Last document id, used as base for delta decoding
     UInt32 last_doc_id;
-    VarInt::readVarUInt32(last_doc_id, in);
+    VarInt::readUInt32(last_doc_id, in);
 
     chassert(stream);
 
@@ -869,7 +660,7 @@ void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStream
         if (doc_count > 1)
         {
             UInt32 bytes;
-            VarInt::readVarUInt32(bytes, in);
+            VarInt::readUInt32(bytes, in);
             if (in.available() >= bytes)
             {
                 uint8_t * packed_buffer_end
@@ -893,7 +684,7 @@ void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStream
     }
 
     UInt32 num_large_blocks;
-    VarInt::readVarUInt32(num_large_blocks, in);
+    VarInt::readUInt32(num_large_blocks, in);
 
     chassert(num_large_blocks >= 1);
 
@@ -908,7 +699,7 @@ void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStream
         UInt32 docs_in_large_block = std::min(remaining_docs, docs_per_large_block);
         UInt32 id;
         UInt64 offset;
-        VarInt::readVarUInt32(id, in);
+        VarInt::readUInt32(id, in);
         readVarUInt(offset, in);
 
         UInt64 index_offset = 0;
@@ -926,7 +717,7 @@ void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStream
 
 void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & stream, const MergeTreeIndexTextParams & index_params) const
 {
-    VarInt::writeVarUInt32(doc_count, wb);
+    VarInt::writeUInt32(doc_count, wb);
     if (doc_count == 0)
         return;
 
@@ -935,7 +726,7 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     /// --------------------------------------------
     if (doc_count == 1)
     {
-        VarInt::writeVarUInt32(embedded_postings[0], wb);
+        VarInt::writeUInt32(embedded_postings[0], wb);
         return;
     }
 
@@ -944,12 +735,12 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
 
     if (doc_count <= MAX_SIZE_OF_EMBEDDED_POSTINGS)
     {
-        VarInt::writeVarUInt32(embedded_postings[0], wb);
+        VarInt::writeUInt32(embedded_postings[0], wb);
         for (UInt32 i = 1; i < doc_count; ++i)
             doc_delta_buffer[i - 1] = embedded_postings[i] - embedded_postings[i - 1] - 1;
         uint8_t * end = turbopfor::p4Enc32(doc_delta_buffer, doc_count - 1, packed_buffer);
         UInt32 len = static_cast<UInt32>(end - packed_buffer);
-        VarInt::writeVarUInt32(len, wb);
+        VarInt::writeUInt32(len, wb);
         wb.write(reinterpret_cast<const char *>(packed_buffer), len);
         return;
     }
@@ -1017,8 +808,8 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
         [&](UInt32 first_doc_id)
         {
             last_doc_id = first_doc_id;
-            VarInt::writeVarUInt32(first_doc_id, wb);
-            VarInt::writeVarUInt32(num_large_blocks, wb);
+            VarInt::writeUInt32(first_doc_id, wb);
+            VarInt::writeUInt32(num_large_blocks, wb);
         },
         [&](UInt32 doc_id)
         {
