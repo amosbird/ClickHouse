@@ -3,6 +3,7 @@
 #include <Storages/MergeTree/MergeTreeReaderStream.h>
 #include <Storages/MergeTree/ProjectionIndex/LengthPrefixedInt.h>
 #include <algorithm>
+#include <cstring>
 
 #include <turbopfor.h>
 namespace DB
@@ -524,7 +525,27 @@ inline void padArithmeticBlock(UInt8 * __restrict out, uint32_t first_doc_id, ui
     if (start > end)
         return;
 
-    /// Find the first doc_id >= start in the arithmetic sequence.
+    /// Fast path for step=1 (zero-delta / consecutive doc_ids) — the most common
+    /// arithmetic block pattern.  Replaces N scalar stores with a single memset
+    /// (Or) or a tight loop that the compiler auto-vectorizes to SIMD paddb (And).
+    if (step == 1)
+    {
+        size_t off = start - row_begin;
+        size_t count = end - start + 1;
+        if constexpr (op == PadOp::Or)
+        {
+            memset(out + off, 1, count);
+        }
+        else
+        {
+            UInt8 * __restrict dst = out + off;
+            for (size_t i = 0; i < count; ++i)
+                ++dst[i];
+        }
+        return;
+    }
+
+    /// General case: non-unit step.
     uint32_t offset = start - first_doc_id;
     uint32_t idx = (offset + step - 1) / step;  /// ceil division
     uint32_t doc_id = first_doc_id + idx * step;
