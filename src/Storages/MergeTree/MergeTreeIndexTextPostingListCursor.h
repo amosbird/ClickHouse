@@ -16,6 +16,7 @@ namespace DB
 {
 
 struct TokenPostingsInfo;
+struct PackedBlockProbe;
 class WriteBuffer;
 class ReadBuffer;
 class IColumn;
@@ -64,7 +65,12 @@ public:
     bool valid() const { return is_valid; }
 
     /// Current doc_id.  Undefined when `valid` returns false.
-    uint32_t value() const { return decoded_values[index]; }
+    uint32_t value() const
+    {
+        if (arithmetic_mode) [[unlikely]]
+            return arithmetic_first + static_cast<uint32_t>(index) * arithmetic_step;
+        return decoded_values[index];
+    }
 
     /// Advance to the first doc_id >= target.
     void seek(uint32_t target);
@@ -98,6 +104,15 @@ private:
     /// block 0, prepends `first_doc_id` which is stored separately in the dictionary.
     /// Returns false when no more packed blocks remain in the current large block.
     bool decodeNextBlock();
+
+    /// Probe the TurboPFor header of packed block `block_idx` to check if it's
+    /// an arithmetic-sequence block (constant or zero delta).  If so, compute
+    /// the block's [first, last] doc_id range without decompressing.
+    ///
+    /// Reads the length-prefix and header bytes from the stream, advancing the
+    /// read position.  Caller must set `need_seek_before_decode = true` before
+    /// falling back to `decodeNextBlock` after a non-arithmetic probe.
+    PackedBlockProbe probePackedBlock(size_t block_idx);
 
     LargePostingListReaderStream * stream = nullptr;   /// Non-owning pointer (may alias owned_stream).
     LargePostingListReaderStreamPtr owned_stream;      /// Owning handle; nullptr for embedded postings.
@@ -135,6 +150,13 @@ private:
     /// `seekImpl` (random jump).  Cleared after the first seek-based decode so that
     /// sequential packed-block reads can proceed without redundant seeks.
     bool need_seek_before_decode = true;
+
+    /// Arithmetic sequence mode: when the current packed block is a constant-delta
+    /// or all-zero TurboPFor block, we skip decompression and compute doc_ids on the fly.
+    bool arithmetic_mode = false;
+    uint32_t arithmetic_step = 0;     /// Delta step (constant_value + 1).
+    uint32_t arithmetic_first = 0;    /// First doc_id of the arithmetic block.
+    uint32_t arithmetic_count = 0;    /// Total elements in the arithmetic block.
 
     double density_val = 0;
 };

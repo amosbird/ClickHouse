@@ -19,6 +19,17 @@ inline void readPrefixVarUInt32(UInt32 & x, ReadBuffer & istr)
 
 } // anonymous namespace
 
+/// Result of probing a TurboPFor packed block header without full decompression.
+/// Valid only for arithmetic-sequence blocks (constant delta or all-zero delta).
+struct PackedBlockProbe
+{
+    bool is_arithmetic = false;  /// True if block is constant-delta or all-zero.
+    uint32_t step = 0;           /// Delta step = constant_value + 1.
+    uint32_t first_doc_id = 0;   /// First doc_id in this block.
+    uint32_t last_doc_id = 0;    /// Last doc_id in this block.
+    uint32_t count = 0;          /// Number of elements in this block.
+};
+
 PostingListCursor::PostingListCursor(LargePostingListReaderStreamPtr owned_stream_, const TokenPostingsInfo & info_)
     : stream(owned_stream_.get())
     , owned_stream(std::move(owned_stream_))
@@ -123,6 +134,8 @@ void PostingListCursor::prepare(size_t large_block_idx)
 
 bool PostingListCursor::decodeNextBlock()
 {
+    arithmetic_mode = false;
+
     if (current_block >= block_count)
         return false;
 
@@ -192,6 +205,122 @@ bool PostingListCursor::decodeNextBlock()
     return true;
 }
 
+PackedBlockProbe PostingListCursor::probePackedBlock(size_t block_idx)
+{
+    chassert(stream);
+    chassert(block_idx < packed_block_offsets.size());
+
+    /// Compute the delta base — same logic as decodeNextBlock.
+    uint32_t delta_base;
+    if (block_idx == 0)
+    {
+        delta_base = static_cast<uint32_t>(info.ranges[current_large_block_idx].begin);
+        if (current_large_block_idx > 0)
+            --delta_base;
+    }
+    else
+        delta_base = packed_block_last_doc_ids[block_idx - 1];
+
+    /// For large block 0, packed block 0: the first_doc_id is prepended from
+    /// the dictionary.  The arithmetic sequence would be broken by this extra
+    /// element, so we skip the optimization for this single block.
+    bool prepend_first_doc_id = (current_large_block_idx == 0 && block_idx == 0);
+    if (prepend_first_doc_id)
+        return PackedBlockProbe{};
+
+    /// Seek to the packed block and read the length-prefix.
+    stream->seek(packed_block_offsets[block_idx]);
+    auto & data_buf = *stream->getDataBuffer();
+
+    UInt32 bytes;
+    readPrefixVarUInt32(bytes, data_buf);
+
+    /// We need at least 1 byte for the header; for constant blocks up to 5 bytes
+    /// (1 header + 4 constant value).  Ensure the buffer has enough data.
+    if (bytes == 0)
+        return PackedBlockProbe{};
+
+    /// Read the header byte.  We need to peek without consuming if this isn't
+    /// an arithmetic block, but since we set need_seek_before_decode = true on
+    /// fallback, the stream position doesn't matter for decodeNextBlock.
+    uint8_t header_byte;
+    if (data_buf.available() >= bytes)
+    {
+        header_byte = static_cast<uint8_t>(*data_buf.position());
+    }
+    else
+    {
+        /// Copy into packed_buffer so we can inspect it.
+        chassert(bytes <= 512);
+        data_buf.readStrict(reinterpret_cast<char *>(stream->packed_buffer), bytes);
+        header_byte = stream->packed_buffer[0];
+    }
+
+    uint32_t constant_value = 0;
+
+    if (header_byte == 0x00)
+    {
+        /// All-zero block: b=0, bx=0.  All deltas are 0, step = 1.
+        constant_value = 0;
+    }
+    else if ((header_byte & 0xC0u) == 0xC0u)
+    {
+        /// Constant block: header = 0xC0 | b.
+        unsigned b = header_byte & 0x3Fu;
+        unsigned bytes_stored = (b + 7u) / 8u;
+
+        if (bytes_stored == 0)
+        {
+            /// b=0 constant block means all deltas are 0.
+            constant_value = 0;
+        }
+        else
+        {
+            /// Read the constant value from the bytes following the header.
+            const uint8_t * payload;
+            if (data_buf.available() >= bytes)
+            {
+                /// Data still in the buffer (we only peeked the header byte above).
+                payload = reinterpret_cast<const uint8_t *>(data_buf.position()) + 1;
+            }
+            else
+            {
+                /// Already copied into packed_buffer.
+                payload = stream->packed_buffer + 1;
+            }
+
+            /// Load little-endian value from 1-4 bytes.
+            constant_value = 0;
+            for (unsigned i = 0; i < bytes_stored && i < 4; ++i)
+                constant_value |= static_cast<uint32_t>(payload[i]) << (8u * i);
+
+            if (b < 32u)
+                constant_value &= (1u << b) - 1u;
+        }
+    }
+    else
+    {
+        /// Not an arithmetic block (simple bitpacking with exceptions, etc.).
+        return PackedBlockProbe{};
+    }
+
+    uint32_t step = constant_value + 1;
+    uint32_t count = (block_idx + 1 == block_count && tail_size > 0)
+                         ? static_cast<uint32_t>(tail_size)
+                         : static_cast<uint32_t>(TURBOPFOR_BLOCK_SIZE);
+
+    uint32_t first_doc_id = delta_base + step;
+    uint32_t last_doc_id = delta_base + step * count;
+
+    return PackedBlockProbe{
+        .is_arithmetic = true,
+        .step = step,
+        .first_doc_id = first_doc_id,
+        .last_doc_id = last_doc_id,
+        .count = count,
+    };
+}
+
 void PostingListCursor::seek(uint32_t target)
 {
     /// Fast path: target may fall within the currently loaded large block.
@@ -233,14 +362,39 @@ bool PostingListCursor::seekImpl(uint32_t target)
         return false;
     }
 
-    /// Check if target falls within the already-decoded packed block.
+    /// Check if target falls within the already-decoded/active packed block.
     if (index < decoded_count)
     {
-        auto it = std::lower_bound(decoded_values + index, decoded_values + decoded_count, target);
-        if (it != decoded_values + decoded_count)
+        if (arithmetic_mode)
         {
-            index = static_cast<size_t>(it - decoded_values);
-            return true;
+            /// Arithmetic block: compute position directly.
+            uint32_t last_in_block = arithmetic_first + (static_cast<uint32_t>(decoded_count) - 1) * arithmetic_step;
+            if (target <= last_in_block)
+            {
+                if (target <= arithmetic_first)
+                {
+                    index = 0;
+                    return true;
+                }
+                uint32_t offset_from_first = target - arithmetic_first;
+                uint32_t idx = offset_from_first / arithmetic_step;
+                uint32_t actual = arithmetic_first + idx * arithmetic_step;
+                if (actual < target && idx + 1 < static_cast<uint32_t>(decoded_count))
+                {
+                    ++idx;
+                }
+                index = idx;
+                return true;
+            }
+        }
+        else
+        {
+            auto it = std::lower_bound(decoded_values + index, decoded_values + decoded_count, target);
+            if (it != decoded_values + decoded_count)
+            {
+                index = static_cast<size_t>(it - decoded_values);
+                return true;
+            }
         }
     }
 
@@ -257,9 +411,42 @@ bool PostingListCursor::seekImpl(uint32_t target)
     /// land in the same packed block (common in leapfrog intersection).
     if (j != current_block || decoded_count == 0)
     {
-        current_block = j;
-        need_seek_before_decode = true;
-        decodeNextBlock();
+        /// Probe the header to check for arithmetic-sequence block.
+        PackedBlockProbe probe = probePackedBlock(j);
+
+        if (probe.is_arithmetic)
+        {
+            /// Direct arithmetic computation — no decompression needed.
+            current_block = j;
+            arithmetic_mode = true;
+            arithmetic_step = probe.step;
+            arithmetic_first = probe.first_doc_id;
+            arithmetic_count = probe.count;
+            decoded_count = probe.count;
+
+            if (target <= probe.first_doc_id)
+            {
+                index = 0;
+            }
+            else
+            {
+                uint32_t offset_from_first = target - probe.first_doc_id;
+                uint32_t idx = offset_from_first / probe.step;
+                uint32_t actual = probe.first_doc_id + idx * probe.step;
+                if (actual < target && idx + 1 < probe.count)
+                    ++idx;
+                index = idx;
+            }
+
+            return true;
+        }
+        else
+        {
+            /// Non-arithmetic block — fall back to full decode.
+            current_block = j;
+            need_seek_before_decode = true;
+            decodeNextBlock();
+        }
     }
 
     /// Binary search within the decoded packed block.
@@ -282,6 +469,12 @@ void PostingListCursor::next()
 
     if (index >= decoded_count)
     {
+        /// If we were in arithmetic mode, the stream position is not at the end
+        /// of the current packed block (we never read the payload), so we need
+        /// to seek before decoding the next block.
+        if (arithmetic_mode)
+            need_seek_before_decode = true;
+
         ++current_block;
         if (current_block < block_count)
         {
@@ -367,6 +560,32 @@ inline void padColumn(UInt8 * __restrict out, const uint32_t * values, size_t ro
     }
 }
 
+/// Scatter-write arithmetic-sequence doc_ids into `out` for the range [row_begin, row_end].
+/// Avoids full TurboPFor decompression for constant-delta and all-zero blocks.
+template <PadOp op>
+inline void padArithmeticBlock(UInt8 * __restrict out, const PackedBlockProbe & probe, size_t row_begin, size_t row_end)
+{
+    uint32_t start = std::max(probe.first_doc_id, static_cast<uint32_t>(row_begin));
+    uint32_t end = std::min(probe.last_doc_id, static_cast<uint32_t>(row_end));
+
+    if (start > end)
+        return;
+
+    /// Find the first doc_id >= start in the arithmetic sequence.
+    uint32_t offset = start - probe.first_doc_id;
+    uint32_t idx = (offset + probe.step - 1) / probe.step;  /// ceil division
+    uint32_t doc_id = probe.first_doc_id + idx * probe.step;
+
+    while (doc_id <= end)
+    {
+        if constexpr (op == PadOp::Or)
+            out[doc_id - row_begin] = 1;
+        else
+            ++out[doc_id - row_begin];
+        doc_id += probe.step;
+    }
+}
+
 void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out, size_t row_begin, size_t row_end)
 {
     chassert(large_block < info.ranges.size());
@@ -415,6 +634,20 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
     for (size_t blk = blk_start; blk < blk_end; ++blk)
     {
         current_block = blk;
+
+        /// Try probing the header for an arithmetic-sequence block.
+        PackedBlockProbe probe = probePackedBlock(blk);
+        if (probe.is_arithmetic)
+        {
+            /// Scatter arithmetic doc_ids directly — no decompression.
+            padArithmeticBlock<PadOp::Or>(out, probe, row_begin, row_end);
+            need_seek_before_decode = true;
+            continue;
+        }
+
+        /// Non-arithmetic block — full decode.  probePackedBlock moved the stream,
+        /// so we must seek back.
+        need_seek_before_decode = true;
         if (!decodeNextBlock())
             return;
 
@@ -514,6 +747,18 @@ void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out
     for (size_t blk = blk_start; blk < blk_end; ++blk)
     {
         current_block = blk;
+
+        /// Try probing the header for an arithmetic-sequence block.
+        PackedBlockProbe probe = probePackedBlock(blk);
+        if (probe.is_arithmetic)
+        {
+            padArithmeticBlock<PadOp::And>(out, probe, row_begin, row_end);
+            need_seek_before_decode = true;
+            continue;
+        }
+
+        /// Non-arithmetic block — full decode.
+        need_seek_before_decode = true;
         if (!decodeNextBlock())
             return;
 
