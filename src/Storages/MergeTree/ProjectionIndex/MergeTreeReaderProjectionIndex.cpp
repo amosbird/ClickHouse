@@ -6,6 +6,8 @@
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
 #include <Columns/ColumnsNumber.h>
 #include <Common/ElapsedTimeProfileEventIncrement.h>
+#include <Core/Settings.h>
+#include <Interpreters/Context.h>
 
 namespace ProfileEvents
 {
@@ -14,6 +16,12 @@ namespace ProfileEvents
 
 namespace DB
 {
+
+namespace Setting
+{
+    extern const SettingsString text_index_posting_list_apply_mode;
+    extern const SettingsFloat text_index_density_threshold;
+}
 
 MergeTreeReaderProjectionIndex::MergeTreeReaderProjectionIndex(
     const IMergeTreeReader * main_reader_, MergeTreeIndexWithCondition index_, NamesAndTypesList columns_, bool can_skip_mark_)
@@ -139,9 +147,9 @@ void MergeTreeReaderProjectionIndex::fillColumnLazy(
     if (cursor_map.empty() || search_query->tokens.empty())
         return;
 
-    /// Use default thresholds for adaptive algorithm selection.
     constexpr bool brute_force_apply = false;
-    constexpr float density_threshold = 0.5f;
+    const auto & query_settings = condition_text.getContext()->getSettingsRef();
+    float density_threshold = static_cast<float>(double(query_settings[Setting::text_index_density_threshold]));
 
     if (search_query->search_mode == TextSearchMode::Any || cursor_map.size() == 1)
         lazyUnionPostingLists(column, cursor_map, search_query->tokens, column_offset, row_offset, num_rows, brute_force_apply, density_threshold);
@@ -157,14 +165,17 @@ size_t MergeTreeReaderProjectionIndex::readRows(
     size_t rows_offset,
     Columns & res_columns)
 {
-    /// Determine apply mode from the on-disk posting list format version:
-    /// - V1 (no block index): use materialize mode (base class)
-    /// - V2 (with block index): use lazy cursor-based mode
+    /// Determine apply mode:
+    /// - V1 (no block index): always use materialize mode (base class)
+    /// - V2 (with block index): use lazy mode if setting allows
     bool use_lazy = false;
     if (granule)
     {
         auto & granule_projection = assert_cast<MergeTreeIndexGranuleProjection &>(*granule);
-        use_lazy = postingListFormatHasBlockIndex(granule_projection.posting_list_format_version);
+        const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
+        const auto & query_settings = condition_text.getContext()->getSettingsRef();
+        use_lazy = postingListFormatHasBlockIndex(granule_projection.posting_list_format_version)
+            && String(query_settings[Setting::text_index_posting_list_apply_mode]) == "lazy";
     }
 
     if (!use_lazy)

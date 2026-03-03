@@ -7421,6 +7421,12 @@ Using the text index postings cache can significantly reduce latency and increas
 Controls how posting lists are applied during projection text index queries.
 'materialize' mode (default) eagerly materializes posting lists into Roaring bitmaps before performing set operations.
 'lazy' mode uses lazy-decoding cursors with adaptive intersection/union algorithms (skip-list leapfrog for sparse, brute-force bitmap for dense), which can significantly reduce memory usage and improve performance for selective queries.
+Note: 'lazy' mode requires V2 posting list format (with block index). V1 data always uses 'materialize' regardless of this setting.
+)", 0) \
+    DECLARE(Float, text_index_density_threshold, 0.5, R"(
+Density threshold for adaptive algorithm selection in lazy posting list mode.
+When the minimum posting list density (cardinality / range_span) across all search terms meets or exceeds this threshold, the brute-force bitmap intersection algorithm is used. Below this threshold, the skip-list leapfrog algorithm is used instead.
+Higher values favor leapfrog (better for sparse queries), lower values favor brute-force (better for dense queries).
 )", 0) \
     DECLARE(Bool, allow_experimental_window_view, false, R"(
 Enable WINDOW VIEW. Not mature enough.
