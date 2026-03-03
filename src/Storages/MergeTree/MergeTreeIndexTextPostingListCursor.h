@@ -16,7 +16,6 @@ namespace DB
 {
 
 struct TokenPostingsInfo;
-struct PackedBlockProbe;
 class WriteBuffer;
 class ReadBuffer;
 class IColumn;
@@ -98,21 +97,17 @@ private:
     /// Returns false if target exceeds this large block's range.
     bool seekImpl(uint32_t target);
 
-    /// Decode the next packed block (TURBOPFOR_BLOCK_SIZE doc_ids, or fewer for the tail block).
-    /// When `need_seek_before_decode` is set, seeks to the absolute stream offset
-    /// from the packed block index before reading.  For large block 0's packed
-    /// block 0, prepends `first_doc_id` which is stored separately in the dictionary.
-    /// Returns false when no more packed blocks remain in the current large block.
-    bool decodeNextBlock();
-
-    /// Probe the TurboPFor header of packed block `block_idx` to check if it's
-    /// an arithmetic-sequence block (constant or zero delta).  If so, compute
-    /// the block's [first, last] doc_id range without decompressing.
+    /// Probe the TurboPFor header of packed block `block_idx` and, if non-arithmetic,
+    /// decode it in one pass — avoiding a double seek that would occur with
+    /// separate probe + decode calls.
     ///
-    /// Reads the length-prefix and header bytes from the stream, advancing the
-    /// read position.  Caller must set `need_seek_before_decode = true` before
-    /// falling back to `decodeNextBlock` after a non-arithmetic probe.
-    PackedBlockProbe probePackedBlock(size_t block_idx);
+    /// On return:
+    ///   - If the block is arithmetic: returns true, `arithmetic_mode` is set with
+    ///     `arithmetic_first` / `arithmetic_step` / `arithmetic_count` populated.
+    ///     `decoded_values` / `decoded_count` are NOT updated.
+    ///   - If the block is non-arithmetic: returns false, `arithmetic_mode` is cleared,
+    ///     `decoded_values` / `decoded_count` are populated.
+    bool probeAndDecodePackedBlock(size_t block_idx);
 
     LargePostingListReaderStream * stream = nullptr;   /// Non-owning pointer (may alias owned_stream).
     LargePostingListReaderStreamPtr owned_stream;      /// Owning handle; nullptr for embedded postings.
@@ -144,12 +139,6 @@ private:
 
     bool is_valid = true;
     bool is_embedded = false;
-
-    /// When true, `decodeNextBlock` seeks to the packed block offset before reading.
-    /// Set after `prepare` (Index Section read moves the stream position) and after
-    /// `seekImpl` (random jump).  Cleared after the first seek-based decode so that
-    /// sequential packed-block reads can proceed without redundant seeks.
-    bool need_seek_before_decode = true;
 
     /// Arithmetic sequence mode: when the current packed block is a constant-delta
     /// or all-zero TurboPFor block, we skip decompression and compute doc_ids on the fly.
