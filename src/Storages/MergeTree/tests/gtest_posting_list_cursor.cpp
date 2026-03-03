@@ -2401,22 +2401,21 @@ TEST(PostingListCursorTest, MultiBlockDensitySparseBlock0)
 
 TEST(PostingListCursorTest, MultiBlockDensityAfterSeekToSecondLargeBlock)
 {
-    /// Block 0: 0..199 (dense).
+    /// Block 0: 0..199 (dense, 200 docs).
     /// Block 1: 500,502,504,...,698 → 100 docs, step 2.
-    /// After seek to block 1: large_block_doc_count = 100, range = (500,698), span = 199.
-    /// density = 100 / 199
+    /// Global density = cardinality / (global_end - global_begin + 1) = 300 / 699.
+    /// Density is computed once at construction and does not change after seek.
     std::vector<uint32_t> block0 = generateRange(0, 200);
     std::vector<uint32_t> block1 = generateRange(500, 100, 2); // 500,502,...,698
     auto data = makeMultiBlockData({block0, block1});
     auto cursor = makeMultiBlockCursor(data);
 
-    /// After construction, density reflects block 0 = 1.0
-    EXPECT_DOUBLE_EQ(cursor->density(), 1.0);
+    double expected_density = 300.0 / 699.0;
+    EXPECT_NEAR(cursor->density(), expected_density, 1e-6);
 
-    /// Seek to block 1 triggers prepare(1), which updates density
+    /// Seek to block 1 — density stays the same (global).
     cursor->seek(500);
     ASSERT_TRUE(cursor->valid());
-    double expected_density = 100.0 / 199.0;
     EXPECT_NEAR(cursor->density(), expected_density, 1e-6);
 }
 
