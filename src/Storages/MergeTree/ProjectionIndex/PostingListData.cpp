@@ -87,6 +87,9 @@ void PostingListWriter::add(UInt32 doc_id, Arena * arena, uint8_t * packed_buffe
     }
 }
 
+/// Writes large posting blocks to the `.lpst` data stream.  When `write_block_index` is true,
+/// an Index Section (per-packed-block offsets and last_doc_ids) is appended after each Data
+/// Section to enable sub-block seeking for lazy cursor apply mode.
 class LargePostingBlockWriter
 {
 public:
@@ -140,7 +143,6 @@ public:
 private:
     void flushLargeBlock()
     {
-        /// V1/V2 shared: offset_in_lpst always points to Data Section start
         VarInt::writeUInt32(current_block_last_doc_id, meta_out);
         writeVarUInt(large_block_start_offset, meta_out);
 
@@ -164,7 +166,7 @@ private:
             packed_block_last_doc_ids.clear();
             packed_block_offsets.clear();
 
-            /// Write index_offset_in_lpst to dictionary stream (V2 only).
+            /// Write index_offset to dictionary stream.
             writeVarUInt(index_section_offset, meta_out);
         }
 
@@ -188,7 +190,7 @@ private:
 };
 
 void PostingListWriter::finish(
-    WriteBuffer & wb, WriteBuffer & large_posting, uint8_t * packed_buffer, const MergeTreeIndexTextParams & index_params, size_t format_version) const
+    WriteBuffer & wb, WriteBuffer & large_posting, uint8_t * packed_buffer, const MergeTreeIndexTextParams & index_params) const
 {
     VarInt::writeUInt32(doc_count, wb);
     if (doc_count == 0)
@@ -242,7 +244,7 @@ void PostingListWriter::finish(
     VarInt::writeUInt32(num_large_blocks, wb);
 
     LargePostingBlockWriter block_writer(wb, large_posting, docs_per_large_block,
-        postingListFormatHasBlockIndex(format_version));
+        index_params.has_block_index);
 
     /// Iterate packed TURBOPFOR_BLOCK_SIZE-doc chunks
     PostingListChunk * it = blocks_head;
@@ -291,9 +293,6 @@ void ReaderStreamVector::merge(const ReaderStreamVector & other)
         }
         entries.emplace_back(oe);
     }
-    /// Propagate format_version from the other side if this side has no entries yet.
-    if (format_version == 0 && other.format_version != 0)
-        format_version = other.format_version;
 }
 
 struct ReaderStreamCursor
@@ -308,7 +307,7 @@ struct ReaderStreamCursor
     UInt64 offset;
     bool do_seek;
 
-    /// V2 large block boundary tracking: when Index Sections are interleaved
+    /// Large block boundary tracking: when Index Sections are interleaved
     /// between Data Sections, we need to skip over them during sequential reads.
     /// Each entry is (docs_remaining_in_this_block, next_block_data_offset).
     /// When `remaining_in_large_block` hits 0, seek to the next block's offset.
@@ -370,7 +369,7 @@ struct ReaderStreamCursor
         chassert(doc_buffer);
     }
 
-    /// Set up large block skip schedule for V2 format.
+    /// Set up large block skip schedule.
     /// `blocks` contains per-large-block metadata; when a large block's Data Section
     /// is fully consumed, the cursor seeks past its Index Section to the next block's
     /// Data Section offset.
@@ -464,7 +463,7 @@ private:
         if (remaining_count == 0)
             return;
 
-        /// V2 large block boundary: if we've consumed all docs in the current
+        /// Large block boundary: if we've consumed all docs in the current
         /// large block, skip over the trailing Index Section by seeking to the
         /// next large block's Data Section offset.
         if (!large_block_skips.empty() && remaining_in_large_block == 0)
@@ -642,7 +641,7 @@ LazyPostingStream::LazyPostingStream(const UInt32 * embedded_postings, UInt32 nu
 
 LazyPostingStream::~LazyPostingStream() = default;
 
-void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStreamPtr & stream, const MergeTreeIndexTextParams & index_params, size_t format_version)
+void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStreamPtr & stream, const MergeTreeIndexTextParams & index_params)
 {
     VarInt::readUInt32(doc_count, in);
     if (doc_count == 0)
@@ -703,7 +702,7 @@ void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStream
         readVarUInt(offset, in);
 
         UInt64 index_offset = 0;
-        if (postingListFormatHasBlockIndex(format_version))
+        if (index_params.has_block_index)
             readVarUInt(index_offset, in);
 
         large_posting_blocks.emplace_back(id, docs_in_large_block, offset, index_offset);
@@ -712,10 +711,9 @@ void PostingListStream::read(ReadBuffer & in, const LargePostingListReaderStream
 
     lazy_posting_stream = std::make_unique<LazyPostingStream>(
         nullptr, 0, ReaderStreamVector{stream, last_doc_id, doc_count, std::move(large_posting_blocks)});
-    lazy_posting_stream->streams.format_version = format_version;
 }
 
-void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & stream, const MergeTreeIndexTextParams & index_params, size_t format_version) const
+void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & stream, const MergeTreeIndexTextParams & index_params) const
 {
     VarInt::writeUInt32(doc_count, wb);
     if (doc_count == 0)
@@ -769,10 +767,10 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
             false,
             true);
 
-        /// In V2 format, Index Sections are interleaved between Data Sections.
+        /// When block index is present, Index Sections are interleaved between Data Sections.
         /// Set up skip schedule so the cursor seeks past each Index Section
         /// at large block boundaries.
-        if (postingListFormatHasBlockIndex(lazy_posting_stream->streams.format_version))
+        if (largePostingBlocksHaveIndex(blocks))
             cursors.back().setLargeBlockSkips(blocks);
     }
 
@@ -783,7 +781,7 @@ void PostingListStream::write(WriteBuffer & wb, LargePostingListWriterStream & s
     const UInt32 large_doc_count = doc_count - 1;
     const UInt32 num_large_blocks = (large_doc_count + docs_per_large_block - 1) / docs_per_large_block;
     LargePostingBlockWriter block_writer(wb, stream.plain_hashing, docs_per_large_block,
-        postingListFormatHasBlockIndex(format_version));
+        index_params.has_block_index);
 
     UInt32 buffered = 0;
     auto flush128 = [&]()
@@ -862,7 +860,7 @@ void PostingListStream::collect(UInt32 * buf) const
             false,
             true);
 
-        if (postingListFormatHasBlockIndex(lazy_posting_stream->streams.format_version))
+        if (largePostingBlocksHaveIndex(blocks))
             cursors.back().setLargeBlockSkips(blocks);
     }
 

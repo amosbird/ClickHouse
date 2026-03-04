@@ -16,10 +16,12 @@ struct MergeTreeIndexGranuleProjection final : public MergeTreeIndexGranuleText
     void deserializeBinaryWithMultipleStreams(MergeTreeIndexInputStreams & streams, MergeTreeIndexDeserializationState & state) override;
 
     static PostingListPtr
-    materializeFromTokenInfo(LargePostingListReaderStream & stream, const TokenPostingsInfo & token_info, size_t block_idx, size_t format_version);
+    materializeFromTokenInfo(LargePostingListReaderStream & stream, const TokenPostingsInfo & token_info, size_t block_idx);
 
     String projection_name;
-    size_t posting_list_format_version = 0;
+
+    /// Whether the posting list blocks include an index section, extracted from part metadata during deserialization.
+    bool has_block_index = false;
 
     /// TODO(amos): Do we need per-token stream to reduce seek?
     LargePostingListReaderStreamPtr large_posting_stream;

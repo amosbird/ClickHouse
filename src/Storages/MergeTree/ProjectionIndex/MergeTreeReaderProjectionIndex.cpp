@@ -1,13 +1,13 @@
 #include <Storages/MergeTree/ProjectionIndex/MergeTreeReaderProjectionIndex.h>
 
+#include <Columns/ColumnsNumber.h>
+#include <Core/Settings.h>
+#include <Interpreters/Context.h>
+#include <Storages/MergeTree/MergeTreeIndexConditionText.h>
 #include <Storages/MergeTree/ProjectionIndex/MergeTreeIndexProjection.h>
 #include <Storages/MergeTree/ProjectionIndex/PostingListState.h>
 #include <Storages/MergeTree/ProjectionIndex/ProjectionIndexSerializationContext.h>
-#include <Storages/MergeTree/MergeTreeIndexConditionText.h>
-#include <Columns/ColumnsNumber.h>
 #include <Common/ElapsedTimeProfileEventIncrement.h>
-#include <Core/Settings.h>
-#include <Interpreters/Context.h>
 
 namespace ProfileEvents
 {
@@ -47,8 +47,7 @@ PostingListPtr MergeTreeReaderProjectionIndex::readPostingsBlockForToken(
     chassert(granule);
     auto & granule_projection = assert_cast<MergeTreeIndexGranuleProjection &>(*granule);
     chassert(granule_projection.large_posting_stream);
-    return MergeTreeIndexGranuleProjection::materializeFromTokenInfo(
-        *granule_projection.large_posting_stream, token_info, block_idx, granule_projection.posting_list_format_version);
+    return MergeTreeIndexGranuleProjection::materializeFromTokenInfo(*granule_projection.large_posting_stream, token_info, block_idx);
 }
 
 LargePostingListReaderStreamPtr MergeTreeReaderProjectionIndex::createIndependentPostingStream() const
@@ -114,8 +113,7 @@ PostingListCursorMap MergeTreeReaderProjectionIndex::buildCursorMap()
             /// Each cursor owns its own stream to avoid seek contention
             /// when multiple cursors share a ReadBuffer in leapfrog intersection.
             auto independent_stream = createIndependentPostingStream();
-            auto cursor = std::make_shared<PostingListCursor>(
-                std::move(independent_stream), *token_info);
+            auto cursor = std::make_shared<PostingListCursor>(std::move(independent_stream), *token_info);
             result.emplace(token, std::move(cursor));
         }
     }
@@ -132,11 +130,7 @@ void MergeTreeReaderProjectionIndex::ensureCursorMap()
 }
 
 void MergeTreeReaderProjectionIndex::fillColumnLazy(
-    IColumn & column,
-    const String & column_name,
-    size_t column_offset,
-    size_t row_offset,
-    size_t num_rows)
+    IColumn & column, const String & column_name, size_t column_offset, size_t row_offset, size_t num_rows)
 {
     auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
@@ -152,9 +146,11 @@ void MergeTreeReaderProjectionIndex::fillColumnLazy(
     float density_threshold = static_cast<float>(double(query_settings[Setting::text_index_density_threshold]));
 
     if (search_query->search_mode == TextSearchMode::Any || cursor_map.size() == 1)
-        lazyUnionPostingLists(column, cursor_map, search_query->tokens, column_offset, row_offset, num_rows, brute_force_apply, density_threshold);
+        lazyUnionPostingLists(
+            column, cursor_map, search_query->tokens, column_offset, row_offset, num_rows, brute_force_apply, density_threshold);
     else if (search_query->search_mode == TextSearchMode::All)
-        lazyIntersectPostingLists(column, cursor_map, search_query->tokens, column_offset, row_offset, num_rows, brute_force_apply, density_threshold);
+        lazyIntersectPostingLists(
+            column, cursor_map, search_query->tokens, column_offset, row_offset, num_rows, brute_force_apply, density_threshold);
 }
 
 size_t MergeTreeReaderProjectionIndex::readRows(
@@ -166,20 +162,22 @@ size_t MergeTreeReaderProjectionIndex::readRows(
     Columns & res_columns)
 {
     /// Determine apply mode:
-    /// - V1 (no block index): always use materialize mode (base class)
-    /// - V2 (with block index): use lazy mode if setting allows
+    /// - No block index feature: always use materialize mode (base class)
+    /// - With block index: use lazy mode if setting allows
     bool use_lazy = false;
     if (granule)
     {
         auto & granule_projection = assert_cast<MergeTreeIndexGranuleProjection &>(*granule);
         const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
         const auto & query_settings = condition_text.getContext()->getSettingsRef();
-        use_lazy = postingListFormatHasBlockIndex(granule_projection.posting_list_format_version)
-            && String(query_settings[Setting::text_index_posting_list_apply_mode]) == "lazy";
+        use_lazy = granule_projection.has_block_index && String(query_settings[Setting::text_index_posting_list_apply_mode]) == "lazy";
     }
 
     if (!use_lazy)
-        return MergeTreeReaderTextIndex::readRows(from_mark, current_task_last_mark, continue_reading, max_rows_to_read, rows_offset, res_columns);
+    {
+        return MergeTreeReaderTextIndex::readRows(
+            from_mark, current_task_last_mark, continue_reading, max_rows_to_read, rows_offset, res_columns);
+    }
 
     /// Lazy mode: use PostingListCursor-based intersection/union.
     ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::TextIndexReaderTotalMicroseconds);

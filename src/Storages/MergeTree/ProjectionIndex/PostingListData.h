@@ -73,7 +73,7 @@ struct alignas(8) PostingListWriter
 
     void add(UInt32 doc_id, Arena * arena, uint8_t * packed_buffer);
     void
-    finish(WriteBuffer & wb, WriteBuffer & large_posting, uint8_t * packed_buffer, const MergeTreeIndexTextParams & index_params, size_t format_version) const;
+    finish(WriteBuffer & wb, WriteBuffer & large_posting, uint8_t * packed_buffer, const MergeTreeIndexTextParams & index_params) const;
 };
 
 static_assert(sizeof(PostingListWriter) <= 40, "PostingListWriter must be less than 40 bytes");
@@ -86,8 +86,8 @@ struct LargePostingBlockMeta
 {
     UInt32 last_doc_id;
     UInt32 block_doc_count;
-    UInt64 offset;           /// Data Section start offset (shared by v1 and v2)
-    UInt64 index_offset;     /// Index Section start offset (v2 only; 0 for v1)
+    UInt64 offset;           /// Data Section start offset
+    UInt64 index_offset;     /// Index Section start offset (0 when block index feature is absent)
 
     /// Default constructor (required by std::vector, resize, etc.)
     LargePostingBlockMeta() noexcept
@@ -107,7 +107,7 @@ struct LargePostingBlockMeta
     {
     }
 
-    /// Fully initialized constructor (v1 compatible)
+    /// Fully initialized constructor (without index_offset)
     LargePostingBlockMeta(UInt32 last_doc_id_, UInt32 doc_count_, UInt64 offset_) noexcept
         : last_doc_id(last_doc_id_)
         , block_doc_count(doc_count_)
@@ -116,7 +116,7 @@ struct LargePostingBlockMeta
     {
     }
 
-    /// Fully initialized constructor (v2 with index_offset)
+    /// Fully initialized constructor (with index_offset)
     LargePostingBlockMeta(UInt32 last_doc_id_, UInt32 doc_count_, UInt64 offset_, UInt64 index_offset_) noexcept
         : last_doc_id(last_doc_id_)
         , block_doc_count(doc_count_)
@@ -132,6 +132,14 @@ struct LargePostingBlockMeta
 };
 
 using LargePostingBlockMetas = std::vector<LargePostingBlockMeta>;
+
+/// Returns true if the block metadata indicates that Index Sections are present.
+/// When blocks have index_offset != 0, they were written with has_block_index enabled
+/// and sequential reads must skip over trailing Index Sections at large block boundaries.
+inline bool largePostingBlocksHaveIndex(const LargePostingBlockMetas & blocks)
+{
+    return !blocks.empty() && blocks.front().index_offset != 0;
+}
 
 struct ReaderStreamEntry
 {
@@ -156,7 +164,6 @@ struct ReaderStreamEntry
 struct ReaderStreamVector
 {
     std::vector<ReaderStreamEntry> entries;
-    size_t format_version = 0;
 
     ReaderStreamVector() = default;
 
@@ -244,9 +251,9 @@ struct alignas(8) PostingListStream
         return *this;
     }
 
-    void read(ReadBuffer & in, const LargePostingListReaderStreamPtr & stream, const MergeTreeIndexTextParams & index_params, size_t format_version);
+    void read(ReadBuffer & in, const LargePostingListReaderStreamPtr & stream, const MergeTreeIndexTextParams & index_params);
 
-    void write(WriteBuffer & wb, LargePostingListWriterStream & stream, const MergeTreeIndexTextParams & index_params, size_t format_version) const;
+    void write(WriteBuffer & wb, LargePostingListWriterStream & stream, const MergeTreeIndexTextParams & index_params) const;
 
     /// Collects all doc IDs into `buf`. Caller must preallocate `buf` with more than `doc_count` elements.
     void collect(UInt32 * buf) const;

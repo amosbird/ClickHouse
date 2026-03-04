@@ -170,6 +170,12 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
         const size_t num_tokens = data.size();
         chassert(rows_read == num_tokens);
 
+        /// Extract has_block_index from the aggregate function params (set during part metadata deserialization).
+        const auto * agg_func = dynamic_cast<const AggregateFunctionPostingList *>(
+            posting_column.getAggregateFunction().get());
+        if (agg_func)
+            has_block_index = agg_func->params.has_block_index;
+
         /// Binary search for needed tokens within this granule's token column.
         size_t search_start = 0;
         for (const auto & token : needed_tokens)
@@ -272,7 +278,7 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
             const auto load_postings = [&]() -> PostingListPtr
             {
                 ProfileEvents::increment(ProfileEvents::TextIndexReadPostings);
-                return materializeFromTokenInfo(*large_posting_stream, *token_info, 0, posting_list_format_version);
+                return materializeFromTokenInfo(*large_posting_stream, *token_info, 0);
             };
 
             auto hash = TextIndexPostingsCache::hash(data_path, projection_part->name, token_info->offsets[0].offset);
@@ -283,7 +289,7 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
 }
 
 PostingListPtr MergeTreeIndexGranuleProjection::materializeFromTokenInfo(
-    LargePostingListReaderStream & stream, const TokenPostingsInfo & token_info, size_t block_idx, size_t /*format_version*/)
+    LargePostingListReaderStream & stream, const TokenPostingsInfo & token_info, size_t block_idx)
 {
     /// For delta-decoding:
     /// - First block: 'begin' is the first doc_id (include it).

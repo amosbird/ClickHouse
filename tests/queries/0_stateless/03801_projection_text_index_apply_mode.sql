@@ -139,33 +139,33 @@ CREATE TABLE tab_large(k UInt64, s String, PROJECTION af INDEX s TYPE text(token
     ENGINE = MergeTree() ORDER BY k
     SETTINGS index_granularity = 8192, index_granularity_bytes = '10Mi';
 
-INSERT INTO tab_large SELECT number, concat('token_', toString(number % 10), ' word_', toString(number)) FROM numbers(500);
+INSERT INTO tab_large SELECT number, concat('token', toString(number % 10), ' word', toString(number)) FROM numbers(500);
 
 SET text_index_posting_list_apply_mode = 'lazy';
-SELECT count() FROM tab_large WHERE hasToken(s, 'token_0');
+SELECT count() FROM tab_large WHERE hasToken(s, 'token0');
 
 SET text_index_posting_list_apply_mode = 'materialize';
-SELECT count() FROM tab_large WHERE hasToken(s, 'token_0');
+SELECT count() FROM tab_large WHERE hasToken(s, 'token0');
 
 SET text_index_posting_list_apply_mode = 'lazy';
-SELECT count() FROM tab_large WHERE hasToken(s, 'token_5');
+SELECT count() FROM tab_large WHERE hasToken(s, 'token5');
 
 SET text_index_posting_list_apply_mode = 'materialize';
-SELECT count() FROM tab_large WHERE hasToken(s, 'token_5');
+SELECT count() FROM tab_large WHERE hasToken(s, 'token5');
 
 -- lazy mode: AND intersection on large dataset
 SET text_index_posting_list_apply_mode = 'lazy';
-SELECT count() FROM tab_large WHERE hasAllTokens(s, ['token_3', 'word_3']);
+SELECT count() FROM tab_large WHERE hasAllTokens(s, ['token3', 'word3']);
 
 SET text_index_posting_list_apply_mode = 'materialize';
-SELECT count() FROM tab_large WHERE hasAllTokens(s, ['token_3', 'word_3']);
+SELECT count() FROM tab_large WHERE hasAllTokens(s, ['token3', 'word3']);
 
 -- lazy mode: OR union on large dataset
 SET text_index_posting_list_apply_mode = 'lazy';
-SELECT count() FROM tab_large WHERE hasAnyTokens(s, ['word_0', 'word_1', 'word_2']);
+SELECT count() FROM tab_large WHERE hasAnyTokens(s, ['word0', 'word1', 'word2']);
 
 SET text_index_posting_list_apply_mode = 'materialize';
-SELECT count() FROM tab_large WHERE hasAnyTokens(s, ['word_0', 'word_1', 'word_2']);
+SELECT count() FROM tab_large WHERE hasAnyTokens(s, ['word0', 'word1', 'word2']);
 
 ----------------------------------------------------
 SELECT 'Test lazy mode with multiple segments (multi-insert without merge)';
@@ -293,38 +293,38 @@ SELECT 'Test lazy mode with large posting list and block-level index';
 DROP TABLE IF EXISTS tab_block_idx;
 
 -- Use small posting_list_block_size (256) to trigger multiple large blocks with fewer rows.
--- This exercises the v2 block-level index layout where each large block has a trailing index section.
+-- This exercises the block-level index layout where each large block has a trailing index section.
 CREATE TABLE tab_block_idx(k UInt64, s String, PROJECTION af INDEX s TYPE text(tokenizer = 'splitByNonAlpha', posting_list_block_size = 256))
     ENGINE = MergeTree() ORDER BY k
     SETTINGS index_granularity = 8192, index_granularity_bytes = '10Mi';
 
-INSERT INTO tab_block_idx SELECT number, concat('token_', toString(number % 10), ' word_', toString(number)) FROM numbers(500);
+INSERT INTO tab_block_idx SELECT number, concat('token', toString(number % 10), ' word', toString(number)) FROM numbers(500);
 
 SET text_index_posting_list_apply_mode = 'lazy';
-SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token_0');
+SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token0');
 
 SET text_index_posting_list_apply_mode = 'materialize';
-SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token_0');
+SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token0');
 
 SET text_index_posting_list_apply_mode = 'lazy';
-SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token_5');
+SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token5');
 
 SET text_index_posting_list_apply_mode = 'materialize';
-SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token_5');
+SELECT count() FROM tab_block_idx WHERE hasToken(s, 'token5');
 
 -- AND intersection with block-level index
 SET text_index_posting_list_apply_mode = 'lazy';
-SELECT count() FROM tab_block_idx WHERE hasAllTokens(s, ['token_3', 'word_3']);
+SELECT count() FROM tab_block_idx WHERE hasAllTokens(s, ['token3', 'word3']);
 
 SET text_index_posting_list_apply_mode = 'materialize';
-SELECT count() FROM tab_block_idx WHERE hasAllTokens(s, ['token_3', 'word_3']);
+SELECT count() FROM tab_block_idx WHERE hasAllTokens(s, ['token3', 'word3']);
 
 -- OR union with block-level index
 SET text_index_posting_list_apply_mode = 'lazy';
-SELECT count() FROM tab_block_idx WHERE hasAnyTokens(s, ['word_0', 'word_1', 'word_2']);
+SELECT count() FROM tab_block_idx WHERE hasAnyTokens(s, ['word0', 'word1', 'word2']);
 
 SET text_index_posting_list_apply_mode = 'materialize';
-SELECT count() FROM tab_block_idx WHERE hasAnyTokens(s, ['word_0', 'word_1', 'word_2']);
+SELECT count() FROM tab_block_idx WHERE hasAnyTokens(s, ['word0', 'word1', 'word2']);
 
 ----------------------------------------------------
 SELECT 'Test lazy mode with large posting list block-level index after merge';
@@ -335,22 +335,22 @@ CREATE TABLE tab_block_merge(k UInt64, s String, PROJECTION af INDEX s TYPE text
     ENGINE = MergeTree() ORDER BY k
     SETTINGS index_granularity = 8192, index_granularity_bytes = '10Mi';
 
-INSERT INTO tab_block_merge SELECT number, concat('token_', toString(number % 10), ' word_', toString(number)) FROM numbers(250);
-INSERT INTO tab_block_merge SELECT number + 250, concat('token_', toString((number + 250) % 10), ' word_', toString(number + 250)) FROM numbers(250);
+INSERT INTO tab_block_merge SELECT number, concat('token', toString(number % 10), ' word', toString(number)) FROM numbers(250);
+INSERT INTO tab_block_merge SELECT number + 250, concat('token', toString((number + 250) % 10), ' word', toString(number + 250)) FROM numbers(250);
 
 OPTIMIZE TABLE tab_block_merge FINAL;
 
 SET text_index_posting_list_apply_mode = 'lazy';
-SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token_0');
+SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token0');
 
 SET text_index_posting_list_apply_mode = 'materialize';
-SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token_0');
+SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token0');
 
 SET text_index_posting_list_apply_mode = 'lazy';
-SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token_5');
+SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token5');
 
 SET text_index_posting_list_apply_mode = 'materialize';
-SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token_5');
+SELECT count() FROM tab_block_merge WHERE hasToken(s, 'token5');
 
 ----------------------------------------------------
 DROP TABLE IF EXISTS tab_mode;

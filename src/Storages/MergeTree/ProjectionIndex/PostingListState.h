@@ -10,28 +10,18 @@
 namespace DB
 {
 
-static constexpr auto POSTING_LIST_FORMAT_VERSION_INITIAL = 0;
-static constexpr auto POSTING_LIST_FORMAT_VERSION_V2 = 1;
-
-inline bool postingListFormatHasBlockIndex(size_t format_version)
-{
-    return format_version >= POSTING_LIST_FORMAT_VERSION_V2;
-}
-
-/// Maps DDL `posting_list_version` (1 or 2) to the on-disk format version constant.
-inline size_t resolvePostingListFormatVersion(size_t ddl_version)
-{
-    if (ddl_version == 1)
-        return POSTING_LIST_FORMAT_VERSION_INITIAL;
-    return POSTING_LIST_FORMAT_VERSION_V2;
-}
+/// On-disk posting list format version.
+/// Bumped when the on-disk layout changes incompatibly.  Readers must reject unknown versions.
+static constexpr size_t POSTING_LIST_FORMAT_VERSION_BASIC = 0;
+static constexpr size_t POSTING_LIST_FORMAT_VERSION_CURRENT = POSTING_LIST_FORMAT_VERSION_BASIC;
 
 /// Projection-index-specific parameters that extend upstream's MergeTreeIndexTextParams.
 /// Inherits all text index params (dictionary_block_size, posting_list_block_size, etc.) and adds
 /// projection-only fields without polluting upstream's struct.
 struct PostingListParams : MergeTreeIndexTextParams
 {
-    size_t format_version = POSTING_LIST_FORMAT_VERSION_INITIAL;
+    /// On-disk format version number.
+    size_t format_version = POSTING_LIST_FORMAT_VERSION_CURRENT;
 
     PostingListParams() = default;
 
@@ -89,16 +79,16 @@ public:
 
 struct DataTypePostingList : public IDataTypeCustomName
 {
-    DataTypePostingList(const Array & parameters_, size_t version_)
+    DataTypePostingList(const Array & parameters_, size_t format_version_)
         : parameters(parameters_)
-        , version(version_)
+        , format_version(format_version_)
     {
     }
 
     String getName() const override;
 
     const Array parameters;
-    size_t version;
+    size_t format_version;
 };
 
 /// Construct PostingList DataType from index definition using the specified posting list params. This is used
@@ -107,11 +97,8 @@ struct DataTypePostingList : public IDataTypeCustomName
 /// The AST arguments are only used to build the metadata Array for serialization (DataTypePostingList::getName()).
 DataTypePtr createPostingListType(const ASTPtr & text_index_definition, const PostingListParams & posting_list_params);
 
-/// Like above, but parses the AST arguments and resolves the format version from `posting_list_version`.
-DataTypePtr createPostingListType(const ASTPtr & text_index_definition);
-
-/// Reconstruct PostingList DataType from on-disk part metadata. The format version is inferred from stored fields and
-/// all historical posting list format versions are supported.
+/// Reconstruct PostingList DataType from on-disk part metadata. The format version is read
+/// from the stored first field; old parts with version 0 are still supported.
 DataTypePtr createPostingListTypeFromPartMetadata(const ASTPtr & parsed_fields);
 
 }

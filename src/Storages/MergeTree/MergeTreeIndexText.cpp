@@ -1417,6 +1417,7 @@ static const String ARGUMENT_DICTIONARY_BLOCK_SIZE = "dictionary_block_size";
 static const String ARGUMENT_DICTIONARY_BLOCK_FRONTCODING_COMPRESSION = "dictionary_block_frontcoding_compression";
 static const String ARGUMENT_POSTING_LIST_BLOCK_SIZE = "posting_list_block_size";
 static const String ARGUMENT_POSTING_LIST_CODEC = "posting_list_codec";
+static const String ARGUMENT_HAS_BLOCK_INDEX = "has_block_index";
 
 namespace
 {
@@ -1512,12 +1513,14 @@ MergeTreeIndexPtr textIndexCreator(const IndexDescription & index)
     UInt64 dictionary_block_size = extractFieldOption<UInt64>(options, ARGUMENT_DICTIONARY_BLOCK_SIZE).value_or(DEFAULT_DICTIONARY_BLOCK_SIZE);
     UInt64 dictionary_block_frontcoding_compression = extractFieldOption<UInt64>(options, ARGUMENT_DICTIONARY_BLOCK_FRONTCODING_COMPRESSION).value_or(DEFAULT_DICTIONARY_BLOCK_USE_FRONTCODING);
     UInt64 posting_list_block_size = extractFieldOption<UInt64>(options, ARGUMENT_POSTING_LIST_BLOCK_SIZE).value_or(DEFAULT_POSTING_LIST_BLOCK_SIZE);
+    UInt64 has_block_index = extractFieldOption<UInt64>(options, ARGUMENT_HAS_BLOCK_INDEX).value_or(1);
 
     MergeTreeIndexTextParams index_params{
         dictionary_block_size,
         dictionary_block_frontcoding_compression,
         posting_list_block_size,
-        std::move(preprocessor_ast)};
+        std::move(preprocessor_ast),
+        static_cast<bool>(has_block_index)};
 
     String posting_list_codec_name = extractFieldOption<String>(options, ARGUMENT_POSTING_LIST_CODEC).value_or(DEFAULT_POSTING_LIST_CODEC);
     auto posting_list_codec = PostingListCodecFactory::createPostingListCodec(posting_list_codec_name, index.name);
@@ -1550,6 +1553,10 @@ void textIndexValidator(const IndexDescription & index, bool /*attach*/)
 
     String posting_list_codec_name = extractFieldOption<String>(options, ARGUMENT_POSTING_LIST_CODEC).value_or(DEFAULT_POSTING_LIST_CODEC);
     PostingListCodecFactory::createPostingListCodec(posting_list_codec_name, index.name);
+
+    UInt64 has_block_index = extractFieldOption<UInt64>(options, ARGUMENT_HAS_BLOCK_INDEX).value_or(1);
+    if (has_block_index > 1)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Text index argument '{}' must be 0 or 1, but got {}", ARGUMENT_HAS_BLOCK_INDEX, has_block_index);
 
     if (!options.empty())
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unexpected text index arguments: {}", fmt::join(std::views::keys(options), ", "));

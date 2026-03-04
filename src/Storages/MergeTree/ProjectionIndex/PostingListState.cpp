@@ -25,7 +25,7 @@ namespace ErrorCodes
 
 void PostingListParams::validate() const
 {
-    if (format_version != POSTING_LIST_FORMAT_VERSION_INITIAL && format_version != POSTING_LIST_FORMAT_VERSION_V2)
+    if (format_version > POSTING_LIST_FORMAT_VERSION_CURRENT)
         throw Exception(ErrorCodes::INCORRECT_DATA, "Unsupported PostingList format version: {}", format_version);
 }
 
@@ -144,7 +144,7 @@ public:
                     const auto * posting_list_data = reinterpret_cast<const PostingListData *>(vec[i]);
                     chassert(posting_list_data->isWriter());
                     posting_list_data->writer.finish(
-                        *stream, large_posting_stream->plain_hashing, large_posting_stream->packed_buffer, function->params, function->params.format_version);
+                        *stream, large_posting_stream->plain_hashing, large_posting_stream->packed_buffer, function->params);
                 }
             }
             else if (reinterpret_cast<const PostingListData *>(vec[0])->isStream())
@@ -153,7 +153,7 @@ public:
                 {
                     const auto * posting_list_data = reinterpret_cast<const PostingListData *>(vec[i]);
                     chassert(posting_list_data->isStream());
-                    posting_list_data->stream.write(*stream, *large_posting_stream, function->params, function->params.format_version);
+                    posting_list_data->stream.write(*stream, *large_posting_stream, function->params);
                 }
             }
         }
@@ -220,7 +220,7 @@ public:
                 {
                     auto & posting_list_data = reinterpret_cast<PostingListData &>(*place);
                     chassert(posting_list_data.isStream());
-                    posting_list_data.stream.read(*stream, large_posting_stream, function->params, function->params.format_version);
+                    posting_list_data.stream.read(*stream, large_posting_stream, function->params);
                 }
                 catch (...)
                 {
@@ -244,7 +244,7 @@ String DataTypePostingList::getName() const
 {
     WriteBufferFromOwnString stream;
     stream << "PostingList(";
-    stream << version;
+    stream << format_version;
     for (const auto & parameter : parameters)
         stream << ", " << applyVisitor(FieldVisitorToString(), parameter);
     stream << ')';
@@ -255,10 +255,13 @@ static DataTypePtr buildPostingListType(const Array & params, const PostingListP
 {
     auto function = std::make_shared<AggregateFunctionPostingList>(posting_list_params);
     auto type = std::make_shared<DataTypeAggregateFunction>(function, DataTypes{}, Array{});
-    type->setCustomization(
-        std::make_unique<DataTypeCustomDesc>(
-            std::make_unique<DataTypePostingList>(params, posting_list_params.format_version),
-            std::make_shared<SerializationPostingList>(function)));
+    /// Mirror format_version into DataTypeAggregateFunction::version so that it propagates to
+    /// ColumnAggregateFunction::version via createColumn() / set(), matching the standard aggregate
+    /// function versioning convention (see ColumnAggregateFunction.h:86).
+    type->setVersion(posting_list_params.format_version, /*if_empty=*/false);
+    type->setCustomization(std::make_unique<DataTypeCustomDesc>(
+        std::make_unique<DataTypePostingList>(params, posting_list_params.format_version),
+        std::make_shared<SerializationPostingList>(function)));
     return type;
 }
 
@@ -300,8 +303,7 @@ static Array convertASTArgumentsToParams(const ASTPtr & arguments)
     return params;
 }
 
-DataTypePtr
-createPostingListType(const ASTPtr & text_index_definition, const PostingListParams & posting_list_params)
+DataTypePtr createPostingListType(const ASTPtr & text_index_definition, const PostingListParams & posting_list_params)
 {
     Array params;
     if (text_index_definition && !text_index_definition->children.empty())
@@ -316,10 +318,11 @@ DataTypePtr createPostingListTypeFromPartMetadata(const ASTPtr & parsed_fields)
         return buildPostingListType({}, {});
 
     const auto & children = parsed_fields->children;
-    const auto * version_literal = children[0]->as<ASTLiteral>();
-    if (!version_literal || version_literal->value.getType() != Field::Types::UInt64)
-        throw Exception(ErrorCodes::INCORRECT_DATA, "First PostingList metadata field must be format version (UInt64)");
+    const auto * descriptor_literal = children[0]->as<ASTLiteral>();
+    if (!descriptor_literal || descriptor_literal->value.getType() != Field::Types::UInt64)
+        throw Exception(ErrorCodes::INCORRECT_DATA, "First PostingList metadata field must be format descriptor (UInt64)");
 
+    const size_t format_version = descriptor_literal->value.safeGet<UInt64>();
     Array params;
     params.reserve(children.size() - 1);
     for (size_t i = 1; i < children.size(); ++i)
@@ -338,7 +341,7 @@ DataTypePtr createPostingListTypeFromPartMetadata(const ASTPtr & parsed_fields)
     /// Extract PostingListParams directly from serialized Tuple parameters,
     /// without round-tripping through AST and parseTextIndexArguments.
     PostingListParams posting_list_params;
-    posting_list_params.format_version = version_literal->value.safeGet<UInt64>();
+    posting_list_params.format_version = format_version;
     for (const auto & param : params)
     {
         const auto & tuple = param.safeGet<Tuple>();

@@ -39,6 +39,6 @@ Test 9: Seek within and across large blocks with ngrams
 750
 1499
 0
-Test 10: Direct read mode with v2 format and large posting list
+Test 10: Direct read mode with large posting list
 200
 0

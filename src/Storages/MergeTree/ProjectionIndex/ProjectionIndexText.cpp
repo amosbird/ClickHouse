@@ -69,7 +69,7 @@ void ProjectionIndexText::fillProjectionDescription(
     result.sample_block_for_keys.insert({ColumnString::create(), std::make_shared<DataTypeString>(), "term"});
     auto posting_list_type = createPostingListType(
         index_ast->as<ASTIndexDeclaration>()->getType()->arguments,
-        PostingListParams(index->text_index->params, POSTING_LIST_FORMAT_VERSION_INITIAL));
+        PostingListParams(index->text_index->params, POSTING_LIST_FORMAT_VERSION_CURRENT));
     result.sample_block
         = {result.sample_block_for_keys.getByPosition(0), {posting_list_type->createColumn(), posting_list_type, "posting"}};
 

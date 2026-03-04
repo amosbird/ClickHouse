@@ -1,7 +1,7 @@
 -- Tags: no-fasttest
 -- no-fasttest: It can be slow
 
--- Tests for large block advancement in V2 lazy apply mode.
+-- Tests for large block advancement in lazy apply mode.
 -- These tests specifically target the next()/seek() cross-large-block behavior
 -- that was fixed: next() must auto-advance to the next large block when the
 -- current one is exhausted, and seek() must skip already-failed large blocks.

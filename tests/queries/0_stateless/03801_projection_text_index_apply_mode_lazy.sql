@@ -1,7 +1,7 @@
 -- Tags: no-fasttest
 -- no-fasttest: It can be slow
 
--- Tests for v2 posting list format and lazy apply mode edge cases:
+-- Tests for lazy apply mode edge cases:
 -- 1. Multiple large blocks per token (small posting_list_block_size)
 -- 2. Seek across packed block boundaries (leapfrog intersection)
 -- 3. Exact TurboPFor boundary doc counts (128, 256, 384 docs)
@@ -232,7 +232,7 @@ SELECT count() FROM tab_empty_seek WHERE hasAllTokens(s, ['present', 'nonexisten
 SELECT 'Test 8: Multiple large blocks after merge';
 
 -- Merge two parts, each generating large posting lists. After merge, the merged
--- posting list should span even more large blocks with correct v2 Index Sections.
+-- posting list should span even more large blocks with correct block index sections.
 
 DROP TABLE IF EXISTS tab_merge_lb;
 
@@ -276,22 +276,22 @@ SELECT k FROM tab_seek_lb WHERE s LIKE '%freq%' AND s LIKE '%zz01499%';
 SELECT k FROM tab_seek_lb WHERE s LIKE '%freq%' AND s LIKE '%zz00000%';
 
 ----------------------------------------------------
-SELECT 'Test 10: Direct read mode with v2 format and large posting list';
+SELECT 'Test 10: Direct read mode with large posting list';
 
-DROP TABLE IF EXISTS tab_dr_v2;
+DROP TABLE IF EXISTS tab_dr;
 
-CREATE TABLE tab_dr_v2(k UInt64, s String, PROJECTION af INDEX s TYPE text(tokenizer = 'splitByNonAlpha', posting_list_block_size = 128))
+CREATE TABLE tab_dr(k UInt64, s String, PROJECTION af INDEX s TYPE text(tokenizer = 'splitByNonAlpha', posting_list_block_size = 128))
     ENGINE = MergeTree() ORDER BY k
     SETTINGS index_granularity = 8192, index_granularity_bytes = '10Mi';
 
-INSERT INTO tab_dr_v2 SELECT number, if(number % 3 = 0, 'common', 'other') FROM numbers(600);
+INSERT INTO tab_dr SELECT number, if(number % 3 = 0, 'common', 'other') FROM numbers(600);
 
 SET query_plan_direct_read_from_text_index = 1;
 
-SELECT count() FROM tab_dr_v2 WHERE hasToken(s, 'common');
+SELECT count() FROM tab_dr WHERE hasToken(s, 'common');
 
 -- AND: common + other = 0 (disjoint)
-SELECT count() FROM tab_dr_v2 WHERE hasToken(s, 'common') AND hasToken(s, 'other');
+SELECT count() FROM tab_dr WHERE hasToken(s, 'common') AND hasToken(s, 'other');
 
 SET query_plan_direct_read_from_text_index = 0;
 
@@ -308,4 +308,4 @@ DROP TABLE IF EXISTS tab_first_doc;
 DROP TABLE IF EXISTS tab_empty_seek;
 DROP TABLE IF EXISTS tab_merge_lb;
 DROP TABLE IF EXISTS tab_seek_lb;
-DROP TABLE IF EXISTS tab_dr_v2;
+DROP TABLE IF EXISTS tab_dr;
