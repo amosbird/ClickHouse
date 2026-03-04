@@ -2,10 +2,22 @@
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeReaderStream.h>
 #include <Storages/MergeTree/ProjectionIndex/LengthPrefixedInt.h>
+#include <Common/ProfileEvents.h>
 #include <algorithm>
 #include <cstring>
 
 #include <turbopfor.h>
+
+namespace ProfileEvents
+{
+    extern const Event TextIndexLazyPackedBlocksDecoded;
+    extern const Event TextIndexLazyPackedBlocksSkipped;
+    extern const Event TextIndexLazySeekCount;
+    extern const Event TextIndexLazyLargeBlocksPrepared;
+    extern const Event TextIndexLazyBruteForceIntersections;
+    extern const Event TextIndexLazyLeapfrogIntersections;
+}
+
 namespace DB
 {
 
@@ -60,6 +72,11 @@ UInt32 PostingListCursor::cardinality() const
 
 void PostingListCursor::prepare(size_t large_block_idx)
 {
+    /// Skip if this large block is already loaded.
+    if (has_prepared_first_large_block && large_block_idx == current_large_block_idx)
+        return;
+
+    ProfileEvents::increment(ProfileEvents::TextIndexLazyLargeBlocksPrepared);
     has_prepared_first_large_block = true;
 
     decoded_count = 0;
@@ -211,6 +228,7 @@ bool PostingListCursor::probeAndDecodePackedBlock(size_t block_idx)
 
         if (is_arithmetic)
         {
+            ProfileEvents::increment(ProfileEvents::TextIndexLazyPackedBlocksSkipped);
             arithmetic_mode = true;
             arithmetic_step = constant_value + 1;
             arithmetic_first = delta_base + arithmetic_step;
@@ -250,6 +268,7 @@ bool PostingListCursor::probeAndDecodePackedBlock(size_t block_idx)
         last_decoded_doc_id = decoded_values[actual_count - 1];
         index = 0;
 
+        ProfileEvents::increment(ProfileEvents::TextIndexLazyPackedBlocksDecoded);
         return false;
     }
 
@@ -287,12 +306,15 @@ bool PostingListCursor::probeAndDecodePackedBlock(size_t block_idx)
         last_decoded_doc_id = decoded_values[actual_count - 1];
         index = 0;
 
+        ProfileEvents::increment(ProfileEvents::TextIndexLazyPackedBlocksDecoded);
         return false;
     }
 }
 
 void PostingListCursor::seek(uint32_t target)
 {
+    ProfileEvents::increment(ProfileEvents::TextIndexLazySeekCount);
+
     /// Fast path: target may fall within the currently loaded large block.
     if (!is_embedded && seekImpl(target))
         return;
@@ -1134,6 +1156,7 @@ void lazyIntersectPostingLists(IColumn & column, const PostingListCursorMap & po
 
     if (n < 256 && (min_density >= density_threshold || brute_force_apply))
     {
+        ProfileEvents::increment(ProfileEvents::TextIndexLazyBruteForceIntersections);
         intersectBruteForce(out, cursors, row_offset, num_rows);
         return;
     }
@@ -1152,6 +1175,7 @@ void lazyIntersectPostingLists(IColumn & column, const PostingListCursorMap & po
             return;
     }
 
+    ProfileEvents::increment(ProfileEvents::TextIndexLazyLeapfrogIntersections);
     intersectLeapfrog(out, cursors, row_offset, end);
 }
 
