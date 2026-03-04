@@ -25,7 +25,7 @@ namespace ErrorCodes
 
 void PostingListParams::validate() const
 {
-    if (format_version != POSTING_LIST_FORMAT_VERSION_INITIAL)
+    if (format_version != POSTING_LIST_FORMAT_VERSION_INITIAL && format_version != POSTING_LIST_FORMAT_VERSION_V2)
         throw Exception(ErrorCodes::INCORRECT_DATA, "Unsupported PostingList format version: {}", format_version);
 }
 
@@ -144,7 +144,7 @@ public:
                     const auto * posting_list_data = reinterpret_cast<const PostingListData *>(vec[i]);
                     chassert(posting_list_data->isWriter());
                     posting_list_data->writer.finish(
-                        *stream, large_posting_stream->plain_hashing, large_posting_stream->packed_buffer, function->params);
+                        *stream, large_posting_stream->plain_hashing, large_posting_stream->packed_buffer, function->params, function->params.format_version);
                 }
             }
             else if (reinterpret_cast<const PostingListData *>(vec[0])->isStream())
@@ -153,7 +153,7 @@ public:
                 {
                     const auto * posting_list_data = reinterpret_cast<const PostingListData *>(vec[i]);
                     chassert(posting_list_data->isStream());
-                    posting_list_data->stream.write(*stream, *large_posting_stream, function->params);
+                    posting_list_data->stream.write(*stream, *large_posting_stream, function->params, function->params.format_version);
                 }
             }
         }
@@ -220,7 +220,7 @@ public:
                 {
                     auto & posting_list_data = reinterpret_cast<PostingListData &>(*place);
                     chassert(posting_list_data.isStream());
-                    posting_list_data.stream.read(*stream, large_posting_stream, function->params);
+                    posting_list_data.stream.read(*stream, large_posting_stream, function->params, function->params.format_version);
                 }
                 catch (...)
                 {

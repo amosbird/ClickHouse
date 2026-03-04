@@ -11,6 +11,20 @@ namespace DB
 {
 
 static constexpr auto POSTING_LIST_FORMAT_VERSION_INITIAL = 0;
+static constexpr auto POSTING_LIST_FORMAT_VERSION_V2 = 1;
+
+inline bool postingListFormatHasBlockIndex(size_t format_version)
+{
+    return format_version >= POSTING_LIST_FORMAT_VERSION_V2;
+}
+
+/// Maps DDL `posting_list_version` (1 or 2) to the on-disk format version constant.
+inline size_t resolvePostingListFormatVersion(size_t ddl_version)
+{
+    if (ddl_version == 1)
+        return POSTING_LIST_FORMAT_VERSION_INITIAL;
+    return POSTING_LIST_FORMAT_VERSION_V2;
+}
 
 /// Projection-index-specific parameters that extend upstream's MergeTreeIndexTextParams.
 /// Inherits all text index params (dictionary_block_size, posting_list_block_size, etc.) and adds
@@ -92,6 +106,9 @@ struct DataTypePostingList : public IDataTypeCustomName
 /// The caller provides already-parsed PostingListParams to avoid redundant re-parsing of the AST arguments.
 /// The AST arguments are only used to build the metadata Array for serialization (DataTypePostingList::getName()).
 DataTypePtr createPostingListType(const ASTPtr & text_index_definition, const PostingListParams & posting_list_params);
+
+/// Like above, but parses the AST arguments and resolves the format version from `posting_list_version`.
+DataTypePtr createPostingListType(const ASTPtr & text_index_definition);
 
 /// Reconstruct PostingList DataType from on-disk part metadata. The format version is inferred from stored fields and
 /// all historical posting list format versions are supported.

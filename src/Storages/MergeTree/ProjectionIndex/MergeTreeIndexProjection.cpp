@@ -8,6 +8,7 @@
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeDataPartChecksum.h>
 #include <Storages/MergeTree/ProjectionIndex/PostingListData.h>
+#include <Storages/MergeTree/ProjectionIndex/PostingListState.h>
 #include <Storages/MergeTree/ProjectionIndex/ProjectionIndexText.h>
 #include <Storages/MergeTree/TextIndexCache.h>
 #include <Storages/ProjectionsDescription.h>
@@ -41,17 +42,16 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
 {
     ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::TextIndexReadGranulesMicroseconds);
 
-    MergeTreeDataPartPtr part;
-    for (const auto & [name, projection_part] : state.part.getProjectionParts())
+    for (const auto & [name, proj_part] : state.part.getProjectionParts())
     {
         if (name == projection_name)
         {
-            part = projection_part;
+            projection_part = proj_part;
             break;
         }
     }
 
-    if (!part)
+    if (!projection_part)
     {
         throw Exception(
             ErrorCodes::LOGICAL_ERROR,
@@ -70,7 +70,7 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
     if (tokens_to_read.empty())
         return;
 
-    DictionaryBlockBase sparse_index(part->getIndex()->at(0));
+    DictionaryBlockBase sparse_index(projection_part->getIndex()->at(0));
     if (sparse_index.empty())
         return;
 
@@ -100,7 +100,10 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
         {
             if (sparse_index.tokens->getDataAt(mark) == token)
             {
-                if (part->index_granularity->hasFinalMark())
+                /// Special handling for the last mark:
+                /// upperBound() lands past the end, but the matching granule
+                /// is the one before the final mark.
+                if (projection_part->index_granularity->hasFinalMark())
                     --mark;
             }
             else
@@ -120,20 +123,20 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
     if (marks_to_read.empty())
         return;
 
-    StorageMetadataPtr metadata_ptr = part->storage.getInMemoryMetadataPtr();
-    StorageSnapshotPtr storage_snapshot_ptr = std::make_shared<StorageSnapshot>(part->storage, metadata_ptr);
+    StorageMetadataPtr metadata_ptr = projection_part->storage.getInMemoryMetadataPtr();
+    StorageSnapshotPtr storage_snapshot_ptr = std::make_shared<StorageSnapshot>(projection_part->storage, metadata_ptr);
     auto alter_conversions = std::make_shared<AlterConversions>();
-    auto part_info = std::make_shared<LoadedMergeTreeDataPartInfoForReader>(part, alter_conversions);
-    auto cols = part->getColumns();
+    auto part_info = std::make_shared<LoadedMergeTreeDataPartInfoForReader>(projection_part, alter_conversions);
+    auto cols = projection_part->getColumns();
     MergeTreeReaderPtr reader = createMergeTreeReader(
         part_info,
         cols,
         storage_snapshot_ptr,
-        part->storage.getSettings(),
+        projection_part->storage.getSettings(),
         MarkRanges{MarkRange(marks_to_read.front().first, marks_to_read.back().first + 1)},
         /*virtual_fields=*/{},
         /*uncompressed_cache=*/{},
-        part->storage.getContext()->getMarkCache().get(),
+        projection_part->storage.getContext()->getMarkCache().get(),
         nullptr,
         MergeTreeReaderSettings::createFromSettings(),
         ValueSizeMap{},
@@ -147,7 +150,7 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
     {
         ProfileEvents::increment(ProfileEvents::TextIndexReadDictionaryBlocks);
 
-        const size_t rows_to_read = part->index_granularity->getMarkRows(mark);
+        const size_t rows_to_read = projection_part->index_granularity->getMarkRows(mark);
         Columns result;
         result.resize(cols.size());
         size_t rows_read = reader->readRows(
@@ -269,10 +272,10 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
             const auto load_postings = [&]() -> PostingListPtr
             {
                 ProfileEvents::increment(ProfileEvents::TextIndexReadPostings);
-                return materializeFromTokenInfo(*large_posting_stream, *token_info, 0);
+                return materializeFromTokenInfo(*large_posting_stream, *token_info, 0, posting_list_format_version);
             };
 
-            auto hash = TextIndexPostingsCache::hash(data_path, part->name, token_info->offsets[0].offset);
+            auto hash = TextIndexPostingsCache::hash(data_path, projection_part->name, token_info->offsets[0].offset);
             auto p = condition_text.postingsCache()->getOrSet(hash, load_postings);
             rare_tokens_postings.emplace(token, std::move(p));
         }
@@ -280,7 +283,7 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
 }
 
 PostingListPtr MergeTreeIndexGranuleProjection::materializeFromTokenInfo(
-    LargePostingListReaderStream & stream, const TokenPostingsInfo & token_info, size_t block_idx)
+    LargePostingListReaderStream & stream, const TokenPostingsInfo & token_info, size_t block_idx, size_t /*format_version*/)
 {
     /// For delta-decoding:
     /// - First block: 'begin' is the first doc_id (include it).

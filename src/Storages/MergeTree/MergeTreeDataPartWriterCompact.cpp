@@ -80,7 +80,7 @@ MergeTreeDataPartWriterCompact::MergeTreeDataPartWriterCompact(
 
 void MergeTreeDataPartWriterCompact::addStreams(const NameAndTypePair & name_and_type, const ASTPtr & effective_codec_desc)
 {
-    ISerialization::StreamCallback callback = [&](const auto & substream_path)
+    ISerialization::StreamCallback callback = [&](const ISerialization::SubstreamPath & substream_path)
     {
         assert(!substream_path.empty());
         String stream_name = ISerialization::getFileNameForStream(name_and_type, substream_path, ISerialization::StreamFileNameSettings(*storage_settings));
