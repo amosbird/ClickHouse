@@ -661,7 +661,33 @@ Currently supported:
 
 * **basic**: equivalent to a normal MergeTree index on the expression.
 
-The framework allows adding more index types in the future.
+* **array**: an inverted index for `Array` or `Map` columns. It expands the column via ARRAY JOIN, creating a sorted mapping from expanded elements back to parent rows. This enables efficient lookups such as `has(array, value)`, `arrayElement(map, key) = value` (i.e. `map['key'] = 'value'`), `mapContains(map, key)`, and arbitrary functions on map values like `map['key'] LIKE '%pattern%'`.
+
+  For `Array(T)` columns, the projection stores rows of `(element, _parent_part_offset)` sorted by `element`.
+
+  For `Map(K, V)` columns, the projection stores rows of `(key, value, _parent_part_offset)` sorted by `(key, value)`.
+
+  Example:
+
+  ```sql
+  CREATE TABLE logs
+  (
+      timestamp DateTime,
+      message String,
+      tags Array(String),
+      labels Map(String, String),
+      PROJECTION tags_proj INDEX tags TYPE array,
+      PROJECTION labels_proj INDEX labels TYPE array
+  )
+  ENGINE = MergeTree
+  ORDER BY timestamp;
+
+  -- These queries will use the projection indexes:
+  SELECT * FROM logs WHERE has(tags, 'error');
+  SELECT * FROM logs WHERE labels['env'] = 'production';
+  SELECT * FROM logs WHERE labels['service'] LIKE '%api%';
+  SELECT * FROM logs WHERE mapContains(labels, 'region');
+  ```
 
 ### Projection storage {#projection-storage}
 Projections are stored inside the part directory. It's similar to an index but contains a subdirectory that stores an anonymous `MergeTree` table's part. The table is induced by the definition query of the projection. If there is a `GROUP BY` clause, the underlying storage engine becomes [AggregatingMergeTree](aggregatingmergetree.md), and all aggregate functions are converted to `AggregateFunction`. If there is an `ORDER BY` clause, the `MergeTree` table uses it as its primary key expression. During the merge process the projection part is merged via its storage's merge routine. The checksum of the parent table's part is combined with the projection's part. Other maintenance jobs are similar to skip indices.

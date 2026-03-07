@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Interpreters/ActionsDAG.h>
 #include <Interpreters/Context_fwd.h>
 #include <Parsers/IAST_fwd.h>
 #include <base/types.h>
@@ -36,6 +37,19 @@ public:
         ContextPtr context,
         const IColumnPermutation * perm_ptr) const
         = 0;
+
+    /// Rewrite a filter DAG to use projection columns instead of original table columns.
+    /// For array projection indices, this transforms expressions like `arrayElement(map_col, 'key')`
+    /// into references to the expanded projection columns (e.g. `map_col_key`, `map_col_value`).
+    /// Returns std::nullopt if the filter cannot be rewritten for this projection.
+    virtual std::optional<ActionsDAG> rewriteFilterDAG(
+        const ActionsDAG & filter_dag,
+        const ActionsDAG::Node * filter_node,
+        const ProjectionDescription & projection) const
+    {
+        UNUSED(filter_dag, filter_node, projection);
+        return std::nullopt;
+    }
 };
 
 using ProjectionIndexPtr = std::shared_ptr<IProjectionIndex>;

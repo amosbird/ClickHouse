@@ -3,6 +3,7 @@
 #include <numeric>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTProjectionDeclaration.h>
+#include <Storages/MergeTree/ProjectionIndex/ProjectionIndexArray.h>
 #include <Storages/MergeTree/ProjectionIndex/ProjectionIndexBasic.h>
 
 namespace DB
@@ -42,6 +43,7 @@ ProjectionIndexPtr ProjectionIndexFactory::get(const ASTProjectionDeclaration & 
 ProjectionIndexFactory::ProjectionIndexFactory()
 {
     registerProjectionIndex<ProjectionIndexBasic>();
+    registerProjectionIndex<ProjectionIndexArray>();
 }
 
 ProjectionIndexFactory & ProjectionIndexFactory::instance()

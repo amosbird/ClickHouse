@@ -4,6 +4,7 @@
 #include <Processors/QueryPlan/FilterStep.h>
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
 
+
 #include <Core/Settings.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeNullable.h>
@@ -394,18 +395,40 @@ void filterPartsAndCollectProjectionCandidates(
 
     auto projection_marks_to_read = projection_parts.getMarksCountAllParts();
 
+    /// For projection indices with rewriteFilterDAG (e.g. array type), rewrite the filter
+    /// BEFORE estimateNumMarksToRead so the primary key analysis works with projection columns
+    /// (e.g. `labels_key = 'env'` instead of `arrayElement(labels, 'env')`).
+    std::optional<ActionsDAG> rewritten_dag;
+    if (projection.index)
+    {
+        rewritten_dag = projection.index->rewriteFilterDAG(
+            *projection_query_info.filter_actions_dag, filter_node, projection);
+    }
+
+    SelectQueryInfo effective_query_info = projection_query_info;
+    if (rewritten_dag)
+    {
+        effective_query_info.filter_actions_dag = std::make_shared<ActionsDAG>(std::move(*rewritten_dag));
+        /// Reset the rewritten DAG so we can regenerate it later for the prewhere.
+        rewritten_dag.reset();
+    }
+
     /// Always request `_parent_part_offset` for projection analysis, even if the column does not exist. This does not
     /// affect the analysis itself. Later code will not use it as an index if the column is missing.
-    static Names required_column_names = {"_parent_part_offset"};
+    static const Names required_column_names = {"_parent_part_offset"};
     auto projection_result_ptr = reader.estimateNumMarksToRead(
         std::move(projection_parts),
         empty_mutations_snapshot,
         required_column_names,
         projection.metadata,
-        projection_query_info,
+        effective_query_info,
         context,
         context->getSettingsRef()[Setting::max_threads],
         nullptr);
+
+    /// If projection analysis exceeded limits, skip this candidate
+    if (!projection_result_ptr->isUsable())
+        return;
 
     /// Projection has no filtering effect, skip it
     if (projection_result_ptr->selected_marks == projection_marks_to_read)
@@ -431,14 +454,32 @@ void filterPartsAndCollectProjectionCandidates(
 
     if (in_use)
     {
-        NameSet available_inputs;
-        available_inputs.reserve(projection.sample_block.columns());
-        for (const auto & column : projection.sample_block)
-            available_inputs.emplace(column.name);
-
         auto prewhere_info = std::make_shared<PrewhereInfo>();
-        prewhere_info->prewhere_actions
-            = projection_query_info.filter_actions_dag->restrictFilterDAGToInputs(filter_node, available_inputs);
+
+        /// Regenerate the rewritten DAG for the prewhere filter.
+        bool rewritten = false;
+        if (projection.index)
+        {
+            rewritten_dag = projection.index->rewriteFilterDAG(
+                *projection_query_info.filter_actions_dag, filter_node, projection);
+            if (rewritten_dag)
+            {
+                prewhere_info->prewhere_actions = std::move(*rewritten_dag);
+                rewritten = true;
+            }
+        }
+
+        if (!rewritten)
+        {
+            NameSet available_inputs;
+            available_inputs.reserve(projection.sample_block.columns());
+            for (const auto & column : projection.sample_block)
+                available_inputs.emplace(column.name);
+
+            prewhere_info->prewhere_actions
+                = projection_query_info.filter_actions_dag->restrictFilterDAGToInputs(filter_node, available_inputs);
+        }
+
         prewhere_info->need_filter = true;
         prewhere_info->prewhere_column_name = prewhere_info->prewhere_actions.getOutputs().front()->result_name;
         prewhere_info->remove_prewhere_column = true;
