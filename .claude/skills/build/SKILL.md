@@ -248,3 +248,30 @@ Build ClickHouse in `build` or `build_debug`, `build_asan`, `build_tsan`, `build
 - **MANDATORY:** ALWAYS provide a final summary to the user at the end of the skill execution (step 6)
 - **CRITICAL:** Build output is redirected to a unique log file created with `mktemp`. The log file path is reported to the user in a copyable format BEFORE starting the build, allowing real-time monitoring with `tail -f`. The log file path is saved from step 2a and passed to the Task agent for analysis. This keeps large build logs out of the main context.
 - **Subagents available:** Task tool is used to analyze all build output (by reading from output file) and provide concise summaries. Additional agents (Explore or general-purpose) can be used for deeper investigation of complex build errors
+
+## Troubleshooting
+
+### Worktree submodule files missing (e.g., SimSIMD `curved.h` not found)
+
+When `create-worktree` hardlinks submodule files from the main repo, it only copies files that exist in the main repo's checkout. If the main repo has an older submodule version (or the submodule is not checked out at all due to sparse checkout), the worktree will be missing files that the worktree's commit expects.
+
+**Symptoms:** Build fails with "file not found" errors in `contrib/` subdirectories, e.g.:
+```
+contrib/SimSIMD/include/simsimd/simsimd.h:107:10: fatal error: 'curved.h' file not found
+```
+
+**Diagnosis:** Check if the file is tracked but deleted in the submodule working tree:
+```bash
+git -C /data2/worktrees/<name>/contrib/<submodule> status
+# Look for "deleted:" entries
+```
+
+**Fix:** Restore the submodule files to match the commit recorded in the worktree:
+```bash
+git -C /data2/worktrees/<name>/contrib/<submodule> checkout -- .
+```
+
+This restores all files to match the submodule's committed state. If needed for a specific submodule:
+```bash
+git -C /data2/worktrees/<name> submodule update --init contrib/<submodule>
+```

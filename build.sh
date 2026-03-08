@@ -98,6 +98,8 @@ COMMON_FLAGS=(
     -DENABLE_THINLTO=0
     -DENABLE_TESTS=1
     -DENABLE_UTILS=0
+    -DUSE_MONGODB=0
+    -DENABLE_LIBPQXX=0
     -DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON
 )
 
@@ -176,6 +178,23 @@ mkdir -p "$BUILD_DIR" "$CCACHE_DIR"
 # --- Stop any existing container with same name ---
 docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 
+# --- Worktree git support ---
+# If the source is a git worktree (.git is a file pointing to the main repo),
+# mount the main repo's .git directory so git commands work inside Docker.
+EXTRA_DOCKER_ARGS=()
+if [[ -f "$WORKTREE_PATH/.git" ]]; then
+    # .git file contains: gitdir: /path/to/main/.git/worktrees/<name>
+    MAIN_GIT_DIR="$(sed 's/^gitdir: //' "$WORKTREE_PATH/.git")"
+    # Resolve to absolute path
+    MAIN_GIT_DIR="$(cd "$WORKTREE_PATH" && cd "$(dirname "$MAIN_GIT_DIR")" && pwd)/$(basename "$MAIN_GIT_DIR")"
+    # The common git dir is two levels up from .git/worktrees/<name>
+    GIT_COMMON="$(cd "$MAIN_GIT_DIR/../.." && pwd)"
+    echo "  Worktree detected, mounting git dir: $GIT_COMMON"
+    EXTRA_DOCKER_ARGS=(
+        --volume "$GIT_COMMON:$GIT_COMMON:ro"
+    )
+fi
+
 # --- Build the Docker command ---
 DOCKER_ARGS=(
     docker run --rm
@@ -185,6 +204,7 @@ DOCKER_ARGS=(
     --volume "$WORKTREE_PATH:/ClickHouse"
     --volume "$CCACHE_BIN:/usr/local/bin/ccache:ro"
     --volume "$CCACHE_DIR:/ccache"
+    "${EXTRA_DOCKER_ARGS[@]}"
     --workdir /ClickHouse/build
     -e CCACHE_DIR=/ccache
     -e CCACHE_MAXSIZE=50G

@@ -42,7 +42,9 @@ git status -sb
 
 ### 2. Draft the PR description
 
-**Show the draft to the user BEFORE creating the PR.** Format:
+**MANDATORY: Show the draft to the user and wait for explicit approval BEFORE creating the PR. Do NOT create the PR without user confirmation.**
+
+Format:
 
 ```
 **Title:** `<imperative mood, concise description>`
@@ -68,11 +70,11 @@ git status -sb
 - [x] Documentation is not required (bug fix, no new user-facing feature)
 ```
 
-Wait for user approval before proceeding.
+Wait for explicit user approval before proceeding. Do NOT create the PR until the user confirms.
 
 ### 3. Push and create PR
 
-After user says "go" (or equivalent approval):
+**Only after the user explicitly says "go", "ok", "确认", or equivalent approval:**
 
 ```bash
 # Push branch to fork

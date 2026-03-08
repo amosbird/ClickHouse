@@ -225,6 +225,7 @@ This prevents the user's Docker wrapper (`~/scripts/docker`) from injecting `--n
 - `/test` - Prompt to select test (currently viewed or custom name)
 - `/test 03312_issue_63093` - Run specific stateless test by name
 - `/test 04005_basic_auth_base64_no_padding` - Run specific stateless test
+- To run multiple tests, list them after a single `--test`: `--test 04028 04029 04030`
 
 ### Integration Tests
 - `/test test_keeper_three_nodes_start` - Run specific integration test
@@ -241,6 +242,24 @@ This prevents the user's Docker wrapper (`~/scripts/docker`) from injecting `--n
 - **MANDATORY:** ALL test output (success or failure) MUST be analyzed by a Task agent
 - **MANDATORY:** For test failures, MUST prompt user if they want deeper analysis
 - **CRITICAL:** Test output is redirected to a unique log file created with `mktemp`. The log file path is reported to the user BEFORE starting the test, allowing real-time monitoring with `tail -f`.
+
+### Running Multiple Tests at Once
+
+To run multiple stateless tests in a single Praktika invocation, list all test names after a **single** `--test` flag, space-separated:
+
+```bash
+export DOCKER_WRAPPER_NO_NET_HOST=1 && python -u -m ci.praktika run "Stateless tests (amd_debug, parallel)" \
+  --test 04028_final_limit_pushdown 04029_multiply_monotonicity_read_in_order 04030_final_coarse_key_merge
+```
+
+**Why this works:**
+1. `__main__.py` defines `--test` with `nargs="+"` (no `action="append"`), so all values after `--test` are collected into a single list: `["04028...", "04029...", "04030..."]`
+2. They are joined with spaces: `"04028... 04029... 04030..."` and appended to the command as `--test 04028... 04029... 04030...`
+3. `functional_tests.py` also defines `--test` with `nargs="+"`, so it re-parses them back into a list
+4. The list is passed to `clickhouse-test` as positional args after `--`: `-- 04028... 04029... 04030...`
+5. `clickhouse-test` treats each positional arg as a **regex pattern** and includes a test if **any** pattern matches (`re.search`)
+
+**⚠️ Do NOT use multiple `--test` flags** (e.g., `--test A --test B`). With `nargs="+"` and no `action="append"`, argparse **replaces** the previous value — only the last `--test` value survives.
 
 ### Stateless Tests
 - Test names do NOT include extensions (use `03312_issue_63093`, not `03312_issue_63093.sh`)
@@ -259,3 +278,23 @@ This prevents the user's Docker wrapper (`~/scripts/docker`) from injecting `--n
   ```bash
   sudo chown -R $(id -u):$(id -g) tests/integration/<test_name>/_instances*/
   ```
+
+## Generating `.reference` Files for New Stateless Tests
+
+When creating a new stateless test, you need a `.reference` file containing the expected stdout output. **Do NOT try to pass `--record` through Praktika** — Praktika does not support forwarding extra flags to `clickhouse-test`.
+
+**Correct workflow:**
+
+1. Create the `.sql`/`.sh` test file first.
+2. Create an **empty** `.reference` file: `touch tests/queries/0_stateless/NNNNN_test_name.reference`
+3. Run the test via Praktika — it will fail with a diff showing all output as added lines (`+`).
+4. Read the diff from the test log to see the actual output.
+5. Write the actual output into the `.reference` file.
+6. Run the test again to confirm it passes.
+
+**Extracting actual output from the test log:** The Praktika log shows the diff in a format like:
+```
+| 2026-03-07 04:07:07 +SELECT * FROM t WHERE x = 1;
+| 2026-03-07 04:07:07 +1	foo
+```
+Lines prefixed with `+` after the timestamp are the actual stdout. Extract these lines (stripping the timestamp and `+` prefix) to build the `.reference` file. Note that the log may truncate the first N lines with `~~~~~ truncated N lines ~~~~~` — in that case you need to reconstruct the full output from the test SQL (since `-- { echoOn }` echoes every statement and comment).

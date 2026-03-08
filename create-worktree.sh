@@ -194,16 +194,20 @@ SUBMODULES="$(git -C "$WORKTREE_PATH" config -f .gitmodules --get-regexp '^submo
 # while all other submodules have modules at modules/contrib/<name>.
 AWS_TOP_LEVEL="aws-c-common aws-c-event-stream aws-checksums"
 
+DEST_WORKTREE_GITDIR="$GIT_COMMON_DIR/worktrees/$WORKTREE_ENTRY"
+
 for sub in $SUBMODULES; do
     name="$(basename "$sub")"
     mkdir -p "$WORKTREE_PATH/$sub"
 
-    # Determine the correct modules path
+    # Determine the correct modules path.
+    # Use absolute paths because the worktree's .git is a file (not a directory),
+    # so relative paths like ../../../.git/worktrees/... won't resolve.
     if echo " $AWS_TOP_LEVEL " | grep -q " $name "; then
-        echo "gitdir: ../../../.git/worktrees/$WORKTREE_ENTRY/modules/$name" \
+        echo "gitdir: $DEST_WORKTREE_GITDIR/modules/$name" \
             >"$WORKTREE_PATH/$sub/.git"
     else
-        echo "gitdir: ../../../.git/worktrees/$WORKTREE_ENTRY/modules/contrib/$name" \
+        echo "gitdir: $DEST_WORKTREE_GITDIR/modules/contrib/$name" \
             >"$WORKTREE_PATH/$sub/.git"
     fi
 done
