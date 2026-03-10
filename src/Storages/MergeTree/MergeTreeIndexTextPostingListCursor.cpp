@@ -3,8 +3,13 @@
 #include <Storages/MergeTree/MergeTreeReaderStream.h>
 #include <Storages/MergeTree/ProjectionIndex/LengthPrefixedInt.h>
 #include <Common/ProfileEvents.h>
+#include <Common/TargetSpecific.h>
 #include <algorithm>
 #include <cstring>
+
+#if USE_MULTITARGET_CODE
+#include <immintrin.h>
+#endif
 
 #include <turbopfor.h>
 
@@ -16,6 +21,9 @@ namespace ProfileEvents
     extern const Event TextIndexLazyLargeBlocksPrepared;
     extern const Event TextIndexLazyBruteForceIntersections;
     extern const Event TextIndexLazyLeapfrogIntersections;
+    extern const Event TextIndexLazyLargeBlocksSkippedDense;
+    extern const Event TextIndexLazyLargeBlocksSkippedCovered;
+    extern const Event TextIndexLazyPackedBlocksSkippedCovered;
 }
 
 namespace DB
@@ -342,7 +350,7 @@ void PostingListCursor::seek(uint32_t target)
 
 bool PostingListCursor::seekImpl(uint32_t target)
 {
-    if (is_embedded)
+    if (unlikely(is_embedded))
     {
         /// Embedded: all doc_ids are in decoded_values, use binary search.
         auto it = std::lower_bound(decoded_values, decoded_values + decoded_count, target);
@@ -582,6 +590,74 @@ inline void padArithmeticBlock(UInt8 * __restrict out, uint32_t first_doc_id, ui
     }
 }
 
+/// Check whether a byte buffer contains no zero bytes.
+/// In the `linearOr` path, buffer values are only 0 or 1, so "no zeros"
+/// is equivalent to "all ones" but avoids the more expensive broadcast of 1.
+///
+/// Called from two sites with different typical sizes:
+///   - Packed block check (Level 2b): 128 bytes (TURBOPFOR_BLOCK_SIZE), or 1–127 for tail blocks.
+///   - Large block check (Level 2a): variable, up to ~500 KB.
+///
+/// Uses the ClickHouse multi-target dispatch pattern:
+///   - AVX2 path with 4x loop unrolling (128 bytes/iteration) when available.
+///   - Scalar fallback via `memchr` on all other platforms (ARM, macOS, non-AVX2 x86).
+
+#if USE_MULTITARGET_CODE
+DECLARE_AVX2_SPECIFIC_CODE(
+inline bool hasNoZeros(const UInt8 * data, size_t count)
+{
+    const UInt8 * p = data;
+    const UInt8 * end = data + count;
+    const __m256i zero = _mm256_setzero_si256();
+
+    /// Phase 1: Process 128 bytes (4 x 32) per iteration.
+    /// OR-accumulate zero-match masks and check once per 128-byte chunk.
+    while (end - p >= 128)
+    {
+        __m256i v0 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+        __m256i v1 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p + 32));
+        __m256i v2 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p + 64));
+        __m256i v3 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p + 96));
+
+        __m256i eq0 = _mm256_cmpeq_epi8(v0, zero);
+        __m256i eq1 = _mm256_cmpeq_epi8(v1, zero);
+        __m256i eq2 = _mm256_cmpeq_epi8(v2, zero);
+        __m256i eq3 = _mm256_cmpeq_epi8(v3, zero);
+
+        __m256i any_zero = _mm256_or_si256(_mm256_or_si256(eq0, eq1),
+                                           _mm256_or_si256(eq2, eq3));
+        if (_mm256_movemask_epi8(any_zero))
+            return false;
+        p += 128;
+    }
+
+    /// Phase 2: Handle remaining 32–127 bytes one vector at a time.
+    while (end - p >= 32)
+    {
+        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+        if (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, zero)))
+            return false;
+        p += 32;
+    }
+
+    /// Phase 3: Tail (< 32 bytes) — delegate to `memchr`.
+    return memchr(p, 0, static_cast<size_t>(end - p)) == nullptr;
+}
+) /// DECLARE_AVX2_SPECIFIC_CODE
+#endif
+
+inline bool hasNoZeros(const UInt8 * data, size_t count)
+{
+#if USE_MULTITARGET_CODE
+    if (isArchSupported(TargetArch::AVX2))
+        return TargetSpecific::AVX2::hasNoZeros(data, count);
+#endif
+
+    /// Scalar fallback: `memchr` uses platform-optimized SIMD internally
+    /// (SSE/AVX on x86_64, NEON on aarch64 via glibc/bionic).
+    return memchr(data, 0, count) == nullptr;
+}
+
 void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out, size_t row_begin, size_t row_end)
 {
     chassert(large_block < info.ranges.size());
@@ -625,6 +701,28 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
 
     for (size_t blk = blk_start; blk < blk_end; ++blk)
     {
+        /// Level 2b — Already-covered packed block skip: if the output region
+        /// for this packed block is already all-1, skip seek + probe + decode.
+        {
+            uint32_t pb_first = (blk == 0)
+                ? static_cast<uint32_t>(info.ranges[large_block].begin)
+                : packed_block_last_doc_ids[blk - 1] + 1;
+            uint32_t pb_last = packed_block_last_doc_ids[blk];
+
+            uint32_t check_begin = std::max(pb_first, static_cast<uint32_t>(row_begin));
+            uint32_t check_end = std::min(pb_last, static_cast<uint32_t>(row_end));
+            if (check_begin <= check_end)
+            {
+                size_t off = check_begin - row_begin;
+                size_t cnt = check_end - check_begin + 1;
+                if (hasNoZeros(out + off, cnt))
+                {
+                    ProfileEvents::increment(ProfileEvents::TextIndexLazyPackedBlocksSkippedCovered);
+                    continue;
+                }
+            }
+        }
+
         /// Probe the header; if non-arithmetic, decode in one pass.
         if (probeAndDecodePackedBlock(blk))
         {
@@ -681,16 +779,53 @@ void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_row
     for (size_t i = current_large_block_idx; i < total_large_blocks; ++i)
     {
         auto large_block = i;
-        size_t begin = info.ranges[large_block].begin;
-        size_t end = info.ranges[large_block].end;
+        size_t lb_begin = info.ranges[large_block].begin;
+        size_t lb_end = info.ranges[large_block].end;
 
-        if (row_offset > end)
+        if (row_offset > lb_end)
             continue;
 
-        if ((row_offset + num_rows) < begin)
+        if ((row_offset + num_rows) < lb_begin)
             break;
 
-        end = std::min(end, row_offset + num_rows - 1);
+        size_t end = std::min(lb_end, row_offset + num_rows - 1);
+
+        /// Compute the clipped region that overlaps [row_offset, row_offset+num_rows)
+        /// and [lb_begin, lb_end].  Used by both skip checks below.
+        size_t clip_begin = std::max(lb_begin, row_offset);
+        size_t clip_end = end;  /// already min'd above
+        size_t clip_off = clip_begin - row_offset;
+        size_t clip_count = clip_end - clip_begin + 1;
+
+        /// Level 1 — Dense large block memset: if every row in the large block's
+        /// range has a posting, we can memset the overlapping region directly,
+        /// skipping `prepare` (Index Section I/O) and all packed block processing.
+        {
+            size_t actual_doc_count = info.offsets[large_block].block_doc_count;
+            /// For large block 0 (non-embedded), `block_doc_count` excludes the
+            /// first_doc_id which is stored inline in the dictionary.  The range
+            /// however covers [first_doc_id, last_doc_id], so add 1.
+            if (large_block == 0 && !is_embedded)
+                actual_doc_count += 1;
+
+            size_t range_span = lb_end - lb_begin + 1;
+            if (actual_doc_count == range_span)
+            {
+                memset(data + clip_off, 1, clip_count);
+                ProfileEvents::increment(ProfileEvents::TextIndexLazyLargeBlocksSkippedDense);
+                continue;
+            }
+        }
+
+        /// Level 2a — Already-covered large block skip: if a previous cursor
+        /// already set the entire overlapping region to 1, skip this large block
+        /// entirely (including Index Section I/O from `prepare`).
+        if (hasNoZeros(data + clip_off, clip_count))
+        {
+            ProfileEvents::increment(ProfileEvents::TextIndexLazyLargeBlocksSkippedCovered);
+            continue;
+        }
+
         prepare(large_block);
         linearOrImpl(large_block, data, row_offset, end);
     }
@@ -1118,6 +1253,14 @@ void lazyUnionPostingLists(IColumn & column, const PostingListCursorMap & postin
         if (it != postings.end())
             cursors.emplace_back(it->second);
     }
+
+    /// Sort by descending density so the densest cursor fills the output buffer
+    /// first.  Subsequent cursors benefit from `hasNoZeros` short-circuiting:
+    /// already-covered regions are skipped without I/O or decoding.
+    std::stable_sort(cursors.begin(), cursors.end(),
+        [](const PostingListCursorPtr & a, const PostingListCursorPtr & b)
+        { return a->density() > b->density(); });
+
     for (const auto & cursor : cursors)
         cursor->linearOr(out, row_offset, num_rows);
 }

@@ -3450,3 +3450,117 @@ TEST(PostingListCursorTest, ArithmeticRepeatedSeekSameBlock)
     ASSERT_TRUE(cursor->valid());
     EXPECT_EQ(cursor->value(), 256u);
 }
+
+
+// ===========================================================================================
+// Section: linearOr block-level coverage skip optimizations
+// ===========================================================================================
+
+TEST(PostingListCursorTest, DenseLargeBlockFullCoverage)
+{
+    /// Single dense large block (step=1) should trigger Level 1 memset path.
+    /// 300 docs: 0..299, all consecutive.
+    auto docs = generateRange(0, 300);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 0, 300);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, DenseLargeBlockWithRowClipping)
+{
+    /// Dense block 0..299, but only query rows 50..249.
+    auto docs = generateRange(0, 300);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 50, 200);
+    auto expected = generateRange(50, 200);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, DenseTwoLargeBlocks)
+{
+    /// Two dense large blocks: block 0 = 0..299, block 1 = 300..599.
+    auto block0 = generateRange(0, 300);
+    auto block1 = generateRange(300, 300);
+    auto data = makeMultiBlockData({block0, block1});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 0, 600);
+    auto expected = generateRange(0, 600);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, SparseLargeBlockNoFalseSkip)
+{
+    /// Sparse block (step=2): 0,2,4,...,598.  300 docs spanning range [0,598].
+    /// range_span=599, doc_count=300 (or 299+1) != 599, so Level 1 must NOT trigger.
+    auto docs = generateRange(0, 300, 2);
+    auto data = makeMultiBlockData({docs});
+    auto cursor = makeMultiBlockCursor(data);
+
+    auto result = linearOrToDocIds(cursor, 0, 599);
+    EXPECT_EQ(result, docs);
+}
+
+TEST(PostingListCursorTest, MultiCursorUnionIdenticalDense)
+{
+    /// Two cursors with the same dense range.  The second cursor should hit
+    /// the Level 2 (already-covered) skip path at either the large block or
+    /// packed block level.
+    auto docs = generateRange(0, 300);
+    auto data1 = makeMultiBlockData({docs});
+    auto data2 = makeMultiBlockData({docs});
+    auto cursor1 = makeMultiBlockCursor(data1);
+    auto cursor2 = makeMultiBlockCursor(data2);
+
+    PostingListCursorMap postings;
+    postings["t1"] = cursor1;
+    postings["t2"] = cursor2;
+
+    auto result = unionAndCollect(postings, {"t1", "t2"}, 0, 300);
+    auto expected = generateRange(0, 300);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, MultiCursorUnionFirstCoversAll)
+{
+    /// First cursor is dense (0..299), second is sparse (0,2,4,...).
+    /// The second cursor should skip everything via Level 2 coverage checks.
+    auto dense_docs = generateRange(0, 300);
+    auto sparse_docs = generateRange(0, 150, 2);  /// 0,2,4,...,298
+    auto data1 = makeMultiBlockData({dense_docs});
+    auto data2 = makeMultiBlockData({sparse_docs});
+    auto cursor1 = makeMultiBlockCursor(data1);
+    auto cursor2 = makeMultiBlockCursor(data2);
+
+    PostingListCursorMap postings;
+    postings["dense"] = cursor1;
+    postings["sparse"] = cursor2;
+
+    auto result = unionAndCollect(postings, {"dense", "sparse"}, 0, 300);
+    auto expected = generateRange(0, 300);
+    EXPECT_EQ(result, expected);
+}
+
+TEST(PostingListCursorTest, MultiCursorPartialOverlap)
+{
+    /// First cursor covers 0..199 (dense), second covers 100..399 (dense).
+    /// Packed-block-level skip should handle the overlapping region 100..199.
+    auto docs1 = generateRange(0, 200);
+    auto docs2 = generateRange(100, 300);
+    auto data1 = makeMultiBlockData({docs1});
+    auto data2 = makeMultiBlockData({docs2});
+    auto cursor1 = makeMultiBlockCursor(data1);
+    auto cursor2 = makeMultiBlockCursor(data2);
+
+    PostingListCursorMap postings;
+    postings["t1"] = cursor1;
+    postings["t2"] = cursor2;
+
+    auto result = unionAndCollect(postings, {"t1", "t2"}, 0, 400);
+    auto expected = generateRange(0, 400);
+    EXPECT_EQ(result, expected);
+}
