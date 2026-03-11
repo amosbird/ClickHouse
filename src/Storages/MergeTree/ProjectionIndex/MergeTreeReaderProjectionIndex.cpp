@@ -46,7 +46,14 @@ PostingListPtr MergeTreeReaderProjectionIndex::readPostingsBlockForToken(
 {
     chassert(granule);
     auto & granule_projection = assert_cast<MergeTreeIndexGranuleProjection &>(*granule);
-    chassert(granule_projection.large_posting_stream);
+
+    /// On cache-hit path, `large_posting_stream` may be null because the granule
+    /// was deserialized entirely from the token cache without reading dictionary blocks
+    /// (which is where the stream is normally obtained from the projection-part reader).
+    /// Lazily create an independent stream from the projection part in that case.
+    if (!granule_projection.large_posting_stream)
+        granule_projection.large_posting_stream = createIndependentPostingStream();
+
     return MergeTreeIndexGranuleProjection::materializeFromTokenInfo(*granule_projection.large_posting_stream, token_info, block_idx);
 }
 
@@ -164,13 +171,24 @@ size_t MergeTreeReaderProjectionIndex::readRows(
     /// Determine apply mode:
     /// - No block index feature: always use materialize mode (base class)
     /// - With block index: use lazy mode if setting allows
+    const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
+    const auto & query_settings = condition_text.getContext()->getSettingsRef();
+    bool want_lazy = String(query_settings[Setting::text_index_posting_list_apply_mode]) == "lazy";
+
+    /// Ensure granule is loaded before checking use_lazy, so the first call
+    /// also goes through the lazy path (instead of falling through to the
+    /// materialize path which processes marks differently).
+    if (!granule && want_lazy)
+    {
+        readGranule();
+        analyzeTokensCardinality();
+    }
+
     bool use_lazy = false;
     if (granule)
     {
         auto & granule_projection = assert_cast<MergeTreeIndexGranuleProjection &>(*granule);
-        const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
-        const auto & query_settings = condition_text.getContext()->getSettingsRef();
-        use_lazy = granule_projection.has_block_index && String(query_settings[Setting::text_index_posting_list_apply_mode]) == "lazy";
+        use_lazy = granule_projection.has_block_index && want_lazy;
     }
 
     if (!use_lazy)
@@ -243,7 +261,8 @@ size_t MergeTreeReaderProjectionIndex::readRows(
                 }
                 else
                 {
-                    fillColumnLazy(column_mutable, columns_to_read[i].name, column_mutable.size(), from_row, rows_to_read);
+                    size_t col_offset_before = column_mutable.size();
+                    fillColumnLazy(column_mutable, columns_to_read[i].name, col_offset_before, from_row, rows_to_read);
                 }
             }
         }

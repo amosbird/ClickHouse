@@ -323,6 +323,16 @@ void PostingListCursor::seek(uint32_t target)
 {
     ProfileEvents::increment(ProfileEvents::TextIndexLazySeekCount);
 
+    /// When a reader is reused across read tasks, the target may be before
+    /// the currently loaded large block.  Reset to scan from the beginning.
+    if (current_large_block_idx > 0
+        && current_large_block_idx < total_large_blocks
+        && target < info.ranges[current_large_block_idx].begin)
+    {
+        current_large_block_idx = 0;
+        has_prepared_first_large_block = false;
+    }
+
     /// Fast path: target may fall within the currently loaded large block.
     if (!is_embedded && seekImpl(target))
         return;
@@ -603,7 +613,7 @@ inline void padArithmeticBlock(UInt8 * __restrict out, uint32_t first_doc_id, ui
 ///   - Scalar fallback via `memchr` on all other platforms (ARM, macOS, non-AVX2 x86).
 
 #if USE_MULTITARGET_CODE
-DECLARE_AVX2_SPECIFIC_CODE(
+DECLARE_X86_64_V3_SPECIFIC_CODE(
 inline bool hasNoZeros(const UInt8 * data, size_t count)
 {
     const UInt8 * p = data;
@@ -643,14 +653,14 @@ inline bool hasNoZeros(const UInt8 * data, size_t count)
     /// Phase 3: Tail (< 32 bytes) — delegate to `memchr`.
     return memchr(p, 0, static_cast<size_t>(end - p)) == nullptr;
 }
-) /// DECLARE_AVX2_SPECIFIC_CODE
+) /// DECLARE_X86_64_V3_SPECIFIC_CODE
 #endif
 
 inline bool hasNoZeros(const UInt8 * data, size_t count)
 {
 #if USE_MULTITARGET_CODE
-    if (isArchSupported(TargetArch::AVX2))
-        return TargetSpecific::AVX2::hasNoZeros(data, count);
+    if (isArchSupported(TargetArch::x86_64_v3))
+        return TargetSpecific::x86_64_v3::hasNoZeros(data, count);
 #endif
 
     /// Scalar fallback: `memchr` uses platform-optimized SIMD internally
@@ -776,6 +786,23 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
 
 void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_rows)
 {
+    if (num_rows == 0)
+        return;
+
+    /// When a reader is reused across read tasks (same data part, different mark
+    /// ranges), the new task's rows may start BEFORE the position we left off.
+    /// Reset the scan start so we don't skip large blocks that cover earlier rows.
+    /// Must also reset has_prepared_first_large_block so that prepare() re-reads the
+    /// Index Section for the rewound large block (otherwise it returns early thinking
+    /// the block is already loaded, but the packed_block metadata is stale).
+    if (current_large_block_idx > 0
+        && current_large_block_idx < total_large_blocks
+        && row_offset < info.ranges[current_large_block_idx].begin)
+    {
+        current_large_block_idx = 0;
+        has_prepared_first_large_block = false;
+    }
+
     for (size_t i = current_large_block_idx; i < total_large_blocks; ++i)
     {
         auto large_block = i;
@@ -910,6 +937,15 @@ void PostingListCursor::linearAndImpl(size_t large_block, UInt8 * __restrict out
 
 void PostingListCursor::linearAnd(UInt8 * data, size_t row_offset, size_t num_rows)
 {
+    /// Same backward-seek guard as linearOr — see comment there.
+    if (current_large_block_idx > 0
+        && current_large_block_idx < total_large_blocks
+        && row_offset < info.ranges[current_large_block_idx].begin)
+    {
+        current_large_block_idx = 0;
+        has_prepared_first_large_block = false;
+    }
+
     for (size_t i = current_large_block_idx; i < total_large_blocks; ++i)
     {
         auto large_block = i;

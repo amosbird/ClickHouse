@@ -4014,7 +4014,7 @@ void ReadFromMergeTree::createReadTasksForTextIndex(const UsefulSkipIndexes & sk
 
     for (const auto & index : skip_indexes.useful_indices)
     {
-        if (dynamic_cast<const MergeTreeIndexText *>(index.index.get()))
+        if (index.index->isTextIndex())
         {
             /// Create tasks for text indexes which don't read virtual columns.
             /// It's required to always read text indexes on separate step on data read.

@@ -7,6 +7,7 @@
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/MergeTreeReaderTextIndex.h>
+#include <Storages/MergeTree/ProjectionIndex/MergeTreeIndexProjection.h>
 #include <Storages/MergeTree/ProjectionIndex/MergeTreeReaderProjectionIndex.h>
 #include <Storages/MergeTree/TextIndexCache.h>
 #include <Storages/MergeTree/TextIndexUtils.h>
@@ -33,6 +34,16 @@ extern const int LOGICAL_ERROR;
 extern const int NOT_IMPLEMENTED;
 }
 
+namespace
+{
+PostingListCodecPtr getPostingListCodecFromIndex(const IMergeTreeIndex & index)
+{
+    if (index.isProjectionIndex())
+        return typeid_cast<const MergeTreeIndexProjection &>(index).text_index->getPostingListCodec();
+    return typeid_cast<const MergeTreeIndexText &>(index).getPostingListCodec();
+}
+}
+
 MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
     const IMergeTreeReader * main_reader_, MergeTreeIndexWithCondition index_, NamesAndTypesList columns_, bool can_skip_mark_)
     : IMergeTreeReader(
@@ -47,7 +58,7 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
           main_reader_->settings)
     , index(std::move(index_))
     , can_skip_mark(can_skip_mark_)
-    , postings_serialization(typeid_cast<const MergeTreeIndexText &>(*index.index).getPostingListCodec())
+    , postings_serialization(getPostingListCodecFromIndex(*index.index))
 {
     for (const auto & column : columns_)
     {

@@ -21,7 +21,10 @@ struct MergeTreeIndexGranuleProjection final : public MergeTreeIndexGranuleText
     String projection_name;
 
     /// Whether the posting list blocks include an index section, extracted from part metadata during deserialization.
-    bool has_block_index = false;
+    /// Default is `true` because projection text indexes are always created with block-index support.
+    /// The value is confirmed from part metadata when dictionary blocks are read (cache-miss path),
+    /// but on cache-hit the default must be correct so the lazy apply-mode is used.
+    bool has_block_index = true;
 
     /// TODO(amos): Do we need per-token stream to reduce seek?
     LargePostingListReaderStreamPtr large_posting_stream;
