@@ -719,38 +719,69 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
     /// Use packed_block_last_doc_ids[] to determine the range of packed blocks
     /// that overlap [row_begin, row_end], skipping all blocks outside this range
     /// without any I/O or decoding.
-    ///
-    /// packed_block_last_doc_ids[j] is the last doc_id in packed block j.
-    /// The first doc_id of block j is approximately packed_block_last_doc_ids[j-1]+1
-    /// (or info.ranges[large_block].begin for block 0).
-    ///
-    /// We want the first block whose last_doc_id >= row_begin (it may contain row_begin)
-    /// and the last block whose first doc_id could be <= row_end.
     auto blk_start_it = std::lower_bound(packed_block_last_doc_ids.begin(), packed_block_last_doc_ids.end(), static_cast<UInt32>(row_begin));
     if (blk_start_it == packed_block_last_doc_ids.end())
-        return;  /// All blocks end before row_begin.
+        return;
     size_t blk_start = static_cast<size_t>(blk_start_it - packed_block_last_doc_ids.begin());
 
-    /// Find the last block that could contain doc_ids in [row_begin, row_end].
-    /// lower_bound(row_end) returns the first block with last_doc_id >= row_end;
-    /// that block is the last one we need (it contains or ends at row_end).
     auto blk_end_it = std::lower_bound(packed_block_last_doc_ids.begin(), packed_block_last_doc_ids.end(), static_cast<UInt32>(row_end));
     size_t blk_end;
     if (blk_end_it == packed_block_last_doc_ids.end())
-        blk_end = block_count;  /// row_end exceeds all blocks — process them all.
+        blk_end = block_count;
     else
-        blk_end = static_cast<size_t>(blk_end_it - packed_block_last_doc_ids.begin()) + 1;  /// +1 for exclusive upper bound.
+        blk_end = static_cast<size_t>(blk_end_it - packed_block_last_doc_ids.begin()) + 1;
+
+    /// Cache frequently accessed data on the stack to avoid repeated pointer chasing.
+    const uint8_t * const data_buf = data_section_buffer.data();
+    const size_t data_buf_sz = data_section_buffer.size();
+    const UInt64 base_offset = data_section_base_offset;
+    const UInt32 range_begin = static_cast<UInt32>(info.ranges[large_block].begin);
+    const bool is_first_large_block = (current_large_block_idx == 0);
+
+    /// Batch-decode buffer: accumulate decoded doc_ids from multiple consecutive
+    /// packed blocks, then scatter them all at once.  This amortizes padColumn
+    /// function-call and loop overhead, and enables the dense-fill optimization
+    /// to trigger across a wider range of doc_ids.
+    static constexpr size_t BATCH_BLOCKS = 16;
+    static constexpr size_t BATCH_BUF_SIZE = BATCH_BLOCKS * TURBOPFOR_BLOCK_SIZE + 1;
+    alignas(16) uint32_t batch_buf[BATCH_BUF_SIZE];
+    size_t batch_count = 0;
+
+    /// Flush the batch buffer: scatter all accumulated doc_ids to the output.
+    auto flushBatch = [&](bool clip_start, bool clip_end)
+    {
+        if (batch_count == 0)
+            return;
+
+        size_t begin_idx = 0;
+        size_t end_idx = batch_count;
+
+        if (clip_start && batch_buf[0] < row_begin)
+        {
+            auto it = std::lower_bound(batch_buf, batch_buf + batch_count, static_cast<uint32_t>(row_begin));
+            if (it == batch_buf + batch_count)
+            {
+                batch_count = 0;
+                return;
+            }
+            begin_idx = static_cast<size_t>(it - batch_buf);
+        }
+        if (clip_end && batch_buf[batch_count - 1] > row_end)
+        {
+            auto it_e = std::upper_bound(batch_buf, batch_buf + batch_count, static_cast<uint32_t>(row_end));
+            end_idx = static_cast<size_t>(it_e - batch_buf);
+        }
+
+        padColumn<PadOp::Or>(out, batch_buf, row_begin, begin_idx, end_idx);
+        batch_count = 0;
+    };
 
     for (size_t blk = blk_start; blk < blk_end; ++blk)
     {
-        /// Level 2b — Already-covered packed block skip: if the output region
-        /// for this packed block is already all-1, skip seek + probe + decode.
-        /// Skipped when the caller guarantees the output is freshly zeroed.
+        /// Level 2b — Already-covered packed block skip.
         if (!skip_covered_checks)
         {
-            uint32_t pb_first = (blk == 0)
-                ? static_cast<uint32_t>(info.ranges[large_block].begin)
-                : packed_block_last_doc_ids[blk - 1] + 1;
+            uint32_t pb_first = (blk == 0) ? range_begin : packed_block_last_doc_ids[blk - 1] + 1;
             uint32_t pb_last = packed_block_last_doc_ids[blk];
 
             uint32_t check_begin = std::max(pb_first, static_cast<uint32_t>(row_begin));
@@ -762,60 +793,160 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
                 if (hasNoZeros(out + off, cnt))
                 {
                     ProfileEvents::increment(ProfileEvents::TextIndexLazyPackedBlocksSkippedCovered);
+                    /// Flush before skip to avoid mixing disjoint ranges.
+                    /// Always clip both ends: the batch may still contain values
+                    /// from the first block that are outside [row_begin, row_end].
+                    flushBatch(true, true);
                     continue;
                 }
             }
         }
 
-        /// Probe the header; if non-arithmetic, decode in one pass.
-        if (probeAndDecodePackedBlock(blk))
+        /// --- Inlined decode (replaces probeAndDecodePackedBlock call) ---
+
+        /// Compute delta base.
+        uint32_t delta_base;
+        if (blk == 0)
         {
-            /// Scatter arithmetic doc_ids directly — no decompression.
-            uint32_t last_doc_id = arithmetic_first + (arithmetic_count - 1) * arithmetic_step;
-            padArithmeticBlock<PadOp::Or>(out, arithmetic_first, last_doc_id, arithmetic_step, row_begin, row_end);
-            continue;
+            delta_base = range_begin;
+            if (current_large_block_idx > 0)
+                --delta_base;
+        }
+        else
+            delta_base = packed_block_last_doc_ids[blk - 1];
+
+        bool prepend_first_doc_id = (is_first_large_block && blk == 0);
+
+        /// Read from in-memory Data Section buffer.
+        size_t buf_offset = static_cast<size_t>(packed_block_offsets[blk] - base_offset);
+        chassert(buf_offset < data_buf_sz);
+
+        const uint8_t * buf_ptr = data_buf + buf_offset;
+        const uint8_t * buf_end_ptr = data_buf + data_buf_sz;
+
+        /// Inline PrefixVarInt decode for length header.
+        UInt32 bytes;
+        {
+            const uint8_t * p = buf_ptr;
+            chassert(p < buf_end_ptr);
+            const uint8_t first_byte = *p++;
+            if (first_byte <= 176)
+                bytes = first_byte;
+            else if (first_byte <= 240)
+                bytes = ((first_byte - 177) << 8) + *p++ + 177;
+            else if (first_byte <= 248)
+            {
+                bytes = ((first_byte - 241) << 16) + (p[0] << 8) + p[1] + 16561;
+                p += 2;
+            }
+            else if (first_byte == 249)
+            {
+                bytes = (static_cast<UInt32>(p[0]) << 16) | (p[1] << 8) | p[2];
+                p += 3;
+            }
+            else
+            {
+                bytes = (static_cast<UInt32>(p[0]) << 24) | (static_cast<UInt32>(p[1]) << 16) | (p[2] << 8) | p[3];
+                p += 4;
+            }
+            buf_ptr = p;
         }
 
-        /// Non-arithmetic block already decoded by probeAndDecodePackedBlock.
+        UInt32 count = (blk + 1 == block_count && tail_size > 0)
+                           ? static_cast<UInt32>(tail_size)
+                           : static_cast<UInt32>(TURBOPFOR_BLOCK_SIZE);
 
-        if (decoded_count == 0)
-            continue;
-
-        /// For the first and last blocks in the range, the block may only partially
-        /// overlap [row_begin, row_end] — use binary search to clip.
-        /// For all middle blocks, every doc_id is guaranteed to be within
-        /// [row_begin, row_end], so skip the binary searches entirely.
-        bool is_first_block = (blk == blk_start);
-        bool is_last_block = (blk + 1 == blk_end);
-        bool need_clip = (is_first_block && decoded_values[0] < row_begin)
-                      || (is_last_block && decoded_values[decoded_count - 1] > row_end);
-
-        if (need_clip)
+        /// --- Arithmetic probe ---
+        if (!prepend_first_doc_id && bytes > 0)
         {
-            size_t begin_idx = 0;
-            size_t end_idx = decoded_count;
+            chassert(buf_ptr + bytes <= buf_end_ptr);
+            const uint8_t * payload_start = buf_ptr;
+            uint8_t header_byte = *payload_start;
 
-            if (is_first_block && decoded_values[0] < row_begin)
+            uint32_t constant_value = 0;
+            bool is_arithmetic = false;
+
+            if (header_byte == 0x00)
             {
-                auto it = std::lower_bound(decoded_values, decoded_values + decoded_count, static_cast<uint32_t>(row_begin));
-                if (it == decoded_values + decoded_count)
-                    continue;
-                begin_idx = static_cast<size_t>(it - decoded_values);
+                constant_value = 0;
+                is_arithmetic = true;
             }
-            if (is_last_block && decoded_values[decoded_count - 1] > row_end)
+            else if ((header_byte & 0xC0u) == 0xC0u)
             {
-                auto it_end = std::upper_bound(decoded_values, decoded_values + decoded_count, static_cast<uint32_t>(row_end));
-                end_idx = static_cast<size_t>(it_end - decoded_values);
+                unsigned b = header_byte & 0x3Fu;
+                unsigned bytes_stored = (b + 7u) / 8u;
+
+                if (bytes_stored == 0)
+                {
+                    constant_value = 0;
+                    is_arithmetic = true;
+                }
+                else
+                {
+                    const uint8_t * cv_payload = payload_start + 1;
+                    constant_value = 0;
+                    for (unsigned i = 0; i < bytes_stored && i < 4; ++i)
+                        constant_value |= static_cast<uint32_t>(cv_payload[i]) << (8u * i);
+                    if (b < 32u)
+                        constant_value &= (1u << b) - 1u;
+                    is_arithmetic = true;
+                }
             }
 
-            padColumn<PadOp::Or>(out, decoded_values, row_begin, begin_idx, end_idx);
+            if (is_arithmetic)
+            {
+                /// Flush batch before arithmetic (arithmetic handled separately).
+                flushBatch(true, true);
+                uint32_t step = constant_value + 1;
+                uint32_t first = delta_base + step;
+                uint32_t last_doc_id = first + (count - 1) * step;
+                padArithmeticBlock<PadOp::Or>(out, first, last_doc_id, step, row_begin, row_end);
+                continue;
+            }
+
+            /// Non-arithmetic: decode to batch buffer.
+            uint8_t * src_ptr = const_cast<uint8_t *>(payload_start);
+            uint32_t * decode_dst = batch_buf + batch_count;
+
+            if (count == TURBOPFOR_BLOCK_SIZE)
+                turbopfor::p4D1Dec128v32(src_ptr, TURBOPFOR_BLOCK_SIZE, decode_dst, delta_base);
+            else
+                turbopfor::p4D1Dec32(src_ptr, count, decode_dst, delta_base);
+            batch_count += count;
         }
         else
         {
-            /// Entire block is within [row_begin, row_end] — no clipping needed.
-            padColumn<PadOp::Or>(out, decoded_values, row_begin, 0, decoded_count);
+            /// Direct decode path (prepend_first_doc_id or bytes == 0).
+            chassert(buf_ptr + bytes <= buf_end_ptr);
+            uint8_t * src_ptr = const_cast<uint8_t *>(buf_ptr);
+
+            uint32_t * decode_dst = batch_buf + batch_count + (prepend_first_doc_id ? 1 : 0);
+
+            if (count == TURBOPFOR_BLOCK_SIZE)
+                turbopfor::p4D1Dec128v32(src_ptr, TURBOPFOR_BLOCK_SIZE, decode_dst, delta_base);
+            else
+                turbopfor::p4D1Dec32(src_ptr, count, decode_dst, delta_base);
+
+            if (prepend_first_doc_id)
+            {
+                batch_buf[batch_count] = static_cast<uint32_t>(info.ranges[0].begin);
+                batch_count += count + 1;
+            }
+            else
+            {
+                batch_count += count;
+            }
+        }
+
+        /// Flush when batch is full or on last block.
+        if (batch_count >= BATCH_BLOCKS * TURBOPFOR_BLOCK_SIZE || blk + 1 == blk_end)
+        {
+            flushBatch(true, true);
         }
     }
+
+    /// Flush any remaining values.
+    flushBatch(true, true);
 }
 
 void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_rows, bool skip_covered_checks)

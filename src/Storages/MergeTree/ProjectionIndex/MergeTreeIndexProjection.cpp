@@ -262,9 +262,6 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
     if (remaining_tokens.empty())
         return;
 
-    large_posting_stream = reader->getProjectionIndexPostingStreamPtr();
-    chassert(large_posting_stream);
-
     const String & data_path = state.part.getDataPartStorage().getFullPath();
     for (const auto & [token, token_info] : remaining_tokens)
     {
@@ -275,6 +272,29 @@ void MergeTreeIndexGranuleProjection::deserializeBinaryWithMultipleStreams(
         }
         else if (token_info->offsets.size() == 1)
         {
+            /// When the block index is present and the token has high cardinality,
+            /// skip materializing the posting list into a Roaring bitmap.
+            /// The lazy apply mode decodes directly from TurboPFor via `PostingListCursor`,
+            /// and mark evaluation uses the range-based `hasAnyRange` check which is
+            /// sufficient for common tokens (false positives are cheap — the cursor
+            /// simply produces no matching doc_ids for empty ranges).
+            ///
+            /// For rare tokens (low cardinality), materialization is cheap and
+            /// enables precise mark filtering that avoids scanning many empty marks.
+            ///
+            /// Threshold: skip when cardinality > 8192 (one granule worth of rows).
+            /// This avoids the O(cardinality) cost of `roaring_bitmap_add_many`
+            /// (e.g., ~5ms for 897K doc_ids) while keeping mark filtering for rare tokens.
+            static constexpr UInt32 MATERIALIZATION_SKIP_THRESHOLD = 8192;
+            if (has_block_index && token_info->cardinality > MATERIALIZATION_SKIP_THRESHOLD)
+                continue;
+
+            if (!large_posting_stream)
+            {
+                large_posting_stream = reader->getProjectionIndexPostingStreamPtr();
+                chassert(large_posting_stream);
+            }
+
             const auto load_postings = [&]() -> PostingListPtr
             {
                 ProfileEvents::increment(ProfileEvents::TextIndexReadPostings);
