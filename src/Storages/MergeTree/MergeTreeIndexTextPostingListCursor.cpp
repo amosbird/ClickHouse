@@ -140,6 +140,21 @@ void PostingListCursor::prepare(size_t large_block_idx)
     for (UInt32 j = 0; j < num_packed_blocks; ++j)
         readVarUInt(packed_block_offsets[j], data_buf);
 
+    /// Bulk-read the entire Data Section into memory.
+    /// Data Section spans [block_meta.offset, block_meta.index_offset).
+    /// This eliminates per-packed-block seeks in `probeAndDecodePackedBlock`.
+    {
+        UInt64 data_start = block_meta.offset;
+        UInt64 data_end = block_meta.index_offset;
+        chassert(data_end > data_start);
+        size_t data_size = static_cast<size_t>(data_end - data_start);
+        data_section_buffer.resize(data_size);
+        data_section_base_offset = data_start;
+        stream->seek(data_start);
+        auto & data_buf2 = *stream->getDataBuffer();
+        data_buf2.readStrict(reinterpret_cast<char *>(data_section_buffer.data()), data_size);
+    }
+
     if (block_count > 0 || large_block_idx == 0)
         is_valid = true;
     else
@@ -148,7 +163,6 @@ void PostingListCursor::prepare(size_t large_block_idx)
 
 bool PostingListCursor::probeAndDecodePackedBlock(size_t block_idx)
 {
-    chassert(stream);
     chassert(block_idx < packed_block_offsets.size());
 
     current_block = block_idx;
@@ -169,13 +183,40 @@ bool PostingListCursor::probeAndDecodePackedBlock(size_t block_idx)
     /// the dictionary, breaking any arithmetic sequence.  Skip straight to decode.
     bool prepend_first_doc_id = (current_large_block_idx == 0 && block_idx == 0);
 
-    /// Seek to the packed block and read the length-prefix (one seek, shared by
-    /// both the probe path and the decode path).
-    stream->seek(packed_block_offsets[block_idx]);
-    auto & data_buf = *stream->getDataBuffer();
+    /// Read from the in-memory Data Section buffer instead of seeking the stream.
+    size_t buf_offset = static_cast<size_t>(packed_block_offsets[block_idx] - data_section_base_offset);
+    chassert(buf_offset < data_section_buffer.size());
 
+    const uint8_t * buf_ptr = data_section_buffer.data() + buf_offset;
+    const uint8_t * buf_end = data_section_buffer.data() + data_section_buffer.size();
+
+    /// Inline PrefixVarInt decode for the length header.
     UInt32 bytes;
-    readPrefixVarUInt32(bytes, data_buf);
+    {
+        const uint8_t * p = buf_ptr;
+        chassert(p < buf_end);
+        const uint8_t first_byte = *p++;
+        if (first_byte <= 176)
+            bytes = first_byte;
+        else if (first_byte <= 240)
+            bytes = ((first_byte - 177) << 8) + *p++ + 177;
+        else if (first_byte <= 248)
+        {
+            bytes = ((first_byte - 241) << 16) + (p[0] << 8) + p[1] + 16561;
+            p += 2;
+        }
+        else if (first_byte == 249)
+        {
+            bytes = (static_cast<UInt32>(p[0]) << 16) | (p[1] << 8) | p[2];
+            p += 3;
+        }
+        else
+        {
+            bytes = (static_cast<UInt32>(p[0]) << 24) | (static_cast<UInt32>(p[1]) << 16) | (p[2] << 8) | p[3];
+            p += 4;
+        }
+        buf_ptr = p;
+    }
 
     UInt32 count = (block_idx + 1 == block_count && tail_size > 0)
                        ? static_cast<UInt32>(tail_size)
@@ -184,23 +225,9 @@ bool PostingListCursor::probeAndDecodePackedBlock(size_t block_idx)
     /// --- Arithmetic probe (only when first_doc_id prepend is not needed) ---
     if (!prepend_first_doc_id && bytes > 0)
     {
-        uint8_t header_byte;
-        bool data_in_buffer = (data_buf.available() >= bytes);
-        const uint8_t * payload_start;
-
-        if (data_in_buffer)
-        {
-            header_byte = static_cast<uint8_t>(*data_buf.position());
-            payload_start = reinterpret_cast<const uint8_t *>(data_buf.position());
-        }
-        else
-        {
-            /// Copy into packed_buffer so we can inspect header + decode from it.
-            chassert(bytes <= 512);
-            data_buf.readStrict(reinterpret_cast<char *>(stream->packed_buffer), bytes);
-            header_byte = stream->packed_buffer[0];
-            payload_start = stream->packed_buffer;
-        }
+        chassert(buf_ptr + bytes <= buf_end);
+        const uint8_t * payload_start = buf_ptr;
+        uint8_t header_byte = *payload_start;
 
         uint32_t constant_value = 0;
         bool is_arithmetic = false;
@@ -247,21 +274,8 @@ bool PostingListCursor::probeAndDecodePackedBlock(size_t block_idx)
             return true;
         }
 
-        /// Non-arithmetic block — continue to decode from current data.
-        /// The stream has already read the length-prefix.  If data was copied
-        /// into packed_buffer (non-inline path), we can decode directly from it.
-        /// If data is still in the read buffer, consume it now.
-        uint8_t * src_ptr;
-        if (data_in_buffer)
-        {
-            src_ptr = reinterpret_cast<uint8_t *>(data_buf.position());
-            data_buf.position() += bytes;
-        }
-        else
-        {
-            /// Already copied into packed_buffer above.
-            src_ptr = stream->packed_buffer;
-        }
+        /// Non-arithmetic block — decode from the in-memory buffer.
+        uint8_t * src_ptr = const_cast<uint8_t *>(payload_start);
 
         last_decoded_doc_id = delta_base;
         UInt32 actual_count = count;
@@ -281,21 +295,9 @@ bool PostingListCursor::probeAndDecodePackedBlock(size_t block_idx)
     }
 
     /// --- Direct decode path (prepend_first_doc_id or bytes == 0) ---
-    /// Need to read the payload from the current stream position (length-prefix
-    /// already consumed above, so no second seek is needed).
     {
-        uint8_t * src_ptr;
-        if (data_buf.available() >= bytes)
-        {
-            src_ptr = reinterpret_cast<uint8_t *>(data_buf.position());
-            data_buf.position() += bytes;
-        }
-        else
-        {
-            chassert(bytes <= 512);
-            data_buf.readStrict(reinterpret_cast<char *>(stream->packed_buffer), bytes);
-            src_ptr = stream->packed_buffer;
-        }
+        chassert(buf_ptr + bytes <= buf_end);
+        uint8_t * src_ptr = const_cast<uint8_t *>(buf_ptr);
 
         UInt32 actual_count = prepend_first_doc_id ? count + 1 : count;
         decoded_count = actual_count;
@@ -506,6 +508,36 @@ inline void padColumn(UInt8 * __restrict out, const uint32_t * values, size_t ro
         return;
 
     const size_t count = static_cast<size_t>(end - p);
+
+    /// Dense fill optimization for PadOp::Or: when the doc_id array covers most
+    /// of its range (>= 75% fill rate), it's faster to memset the entire range
+    /// to 1 and then clear the gaps, rather than scatter-writing each doc_id.
+    /// For 100 out of 128 doc_ids this does memset(128) + 28 zero-writes
+    /// instead of 100 scatter-writes.
+    if constexpr (op == PadOp::Or)
+    {
+        uint32_t range_span = values[length - 1] - values[begin] + 1;
+        if (count >= 32 && count * 4 >= range_span * 3)  // >= 75% fill
+        {
+            size_t off = values[begin] - row_begin;
+            memset(out + off, 1, range_span);
+
+            /// Clear gaps: walk the sorted array and zero out positions not present.
+            /// Use two pointers: expected (sequential) vs actual (decoded doc_ids).
+            uint32_t expected = values[begin];
+            for (size_t i = begin; i < length; ++i)
+            {
+                while (expected < values[i])
+                {
+                    out[expected - row_begin] = 0;
+                    ++expected;
+                }
+                expected = values[i] + 1;
+            }
+            return;
+        }
+    }
+
     const uint32_t * loop_end = p + (count / 4) * 4;
 
     for (; p < loop_end; p += 4)
@@ -668,7 +700,7 @@ inline bool hasNoZeros(const UInt8 * data, size_t count)
     return memchr(data, 0, count) == nullptr;
 }
 
-void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out, size_t row_begin, size_t row_end)
+void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out, size_t row_begin, size_t row_end, bool skip_covered_checks)
 {
     chassert(large_block < info.ranges.size());
 
@@ -713,6 +745,8 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
     {
         /// Level 2b — Already-covered packed block skip: if the output region
         /// for this packed block is already all-1, skip seek + probe + decode.
+        /// Skipped when the caller guarantees the output is freshly zeroed.
+        if (!skip_covered_checks)
         {
             uint32_t pb_first = (blk == 0)
                 ? static_cast<uint32_t>(info.ranges[large_block].begin)
@@ -784,7 +818,7 @@ void PostingListCursor::linearOrImpl(size_t large_block, UInt8 * __restrict out,
     }
 }
 
-void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_rows)
+void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_rows, bool skip_covered_checks)
 {
     if (num_rows == 0)
         return;
@@ -847,14 +881,15 @@ void PostingListCursor::linearOr(UInt8 * data, size_t row_offset, size_t num_row
         /// Level 2a — Already-covered large block skip: if a previous cursor
         /// already set the entire overlapping region to 1, skip this large block
         /// entirely (including Index Section I/O from `prepare`).
-        if (hasNoZeros(data + clip_off, clip_count))
+        /// Skipped when the caller guarantees the output is freshly zeroed.
+        if (!skip_covered_checks && hasNoZeros(data + clip_off, clip_count))
         {
             ProfileEvents::increment(ProfileEvents::TextIndexLazyLargeBlocksSkippedCovered);
             continue;
         }
 
         prepare(large_block);
-        linearOrImpl(large_block, data, row_offset, end);
+        linearOrImpl(large_block, data, row_offset, end, skip_covered_checks);
     }
 }
 
@@ -1242,7 +1277,7 @@ void intersectLeapfrog(UInt8 * out, const std::vector<PostingListCursorPtr> & cu
 /// then a final pass converts count == n into 1, everything else into 0.
 void intersectBruteForce(UInt8 * out, const std::vector<PostingListCursorPtr> & cursors, size_t row_offset, size_t num_rows)
 {
-    cursors[0]->linearOr(out, row_offset, num_rows);
+    cursors[0]->linearOr(out, row_offset, num_rows, /*skip_covered_checks=*/ true);
 
     for (size_t i = 1; i < cursors.size(); ++i)
         cursors[i]->linearAnd(out, row_offset, num_rows);
@@ -1297,8 +1332,10 @@ void lazyUnionPostingLists(IColumn & column, const PostingListCursorMap & postin
         [](const PostingListCursorPtr & a, const PostingListCursorPtr & b)
         { return a->density() > b->density(); });
 
-    for (const auto & cursor : cursors)
-        cursor->linearOr(out, row_offset, num_rows);
+    /// The first cursor writes to a freshly zeroed buffer, so `hasNoZeros`
+    /// covered-region checks are guaranteed to return false — skip them.
+    for (size_t i = 0; i < cursors.size(); ++i)
+        cursors[i]->linearOr(out, row_offset, num_rows, /*skip_covered_checks=*/ i == 0);
 }
 
 void lazyIntersectPostingLists(IColumn & column, const PostingListCursorMap & postings, const std::vector<String> & search_tokens, size_t column_offset, size_t row_offset, size_t num_rows, bool brute_force_apply, float density_threshold)
@@ -1322,7 +1359,7 @@ void lazyIntersectPostingLists(IColumn & column, const PostingListCursorMap & po
 
     if (n == 1)
     {
-        cursors.front()->linearOr(out, row_offset, num_rows);
+        cursors.front()->linearOr(out, row_offset, num_rows, /*skip_covered_checks=*/ true);
         return;
     }
 

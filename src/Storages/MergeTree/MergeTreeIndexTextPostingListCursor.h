@@ -52,7 +52,11 @@ public:
     PostingListCursor(const TokenPostingsInfo & info_);
 
     /// Set bits in `data` for all doc_ids in [row_offset, row_offset + num_rows).
-    void linearOr(UInt8 * data, size_t row_offset, size_t num_rows);
+    /// When `skip_covered_checks` is true, the "already-covered" hasNoZeros checks
+    /// at both large-block and packed-block levels are skipped.  This is an
+    /// optimization for single-cursor paths where the output buffer is known to be
+    /// freshly zero-initialized and no prior cursor could have set bits.
+    void linearOr(UInt8 * data, size_t row_offset, size_t num_rows, bool skip_covered_checks = false);
 
     /// Increment counters in `data` for all doc_ids in [row_offset, row_offset + num_rows).
     void linearAnd(UInt8 * data, size_t row_offset, size_t num_rows);
@@ -89,7 +93,7 @@ private:
     /// For embedded postings: decodes the entire array into `decoded_values`.
     void prepare(size_t large_block);
 
-    void linearOrImpl(size_t large_block, UInt8 *, size_t row_begin, size_t row_end);
+    void linearOrImpl(size_t large_block, UInt8 *, size_t row_begin, size_t row_end, bool skip_covered_checks);
     void linearAndImpl(size_t large_block, UInt8 *, size_t row_begin, size_t row_end);
 
     /// Seek to the first doc_id >= target within the current large block.
@@ -131,6 +135,13 @@ private:
     /// Enables O(log N) seek within a large block.
     std::vector<UInt32> packed_block_last_doc_ids;  /// packed_block_last_doc_ids[j] = last doc_id of packed block j.
     std::vector<UInt64> packed_block_offsets;        /// packed_block_offsets[j] = absolute byte offset in .lpst.
+
+    /// Bulk-loaded Data Section buffer.  When a large block has an Index Section
+    /// (index_offset != 0), `prepare` reads the entire Data Section
+    /// [offset, index_offset) into this buffer.  `probeAndDecodePackedBlock`
+    /// then works from memory instead of seeking the stream per packed block.
+    std::vector<uint8_t> data_section_buffer;
+    UInt64 data_section_base_offset = 0;           /// Absolute file offset of data_section_buffer[0].
 
     /// Large block iteration state.
     size_t total_large_blocks = 0;             /// Number of large blocks for this token.

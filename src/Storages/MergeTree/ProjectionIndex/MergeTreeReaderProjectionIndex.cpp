@@ -250,11 +250,33 @@ size_t MergeTreeReaderProjectionIndex::readRows(
                 auto & column_data = assert_cast<ColumnUInt8 &>(column->assumeMutableRef()).getData();
                 column_data.resize_fill(column->size() + rows_to_read, 0);
             }
+
+            ++from_mark;
+            from_row += rows_to_read;
+            read_rows += rows_to_read;
         }
         else
         {
-            /// Build cursor map once (lazy), then reuse for all subsequent marks.
+            /// Batch consecutive may-be-true marks into a single fillColumnLazy call.
+            /// This reduces per-mark overhead: fewer linearOr calls, fewer large block
+            /// overlap checks, and better sequential access patterns for packed blocks.
             ensureCursorMap();
+
+            size_t batch_rows = rows_to_read;
+            size_t batch_end_mark = from_mark + 1;
+
+            while (batch_end_mark < total_marks && read_rows + batch_rows < max_rows_to_read)
+            {
+                if (!analyzed_granules.contains(static_cast<UInt32>(batch_end_mark)))
+                    canSkipMark(batch_end_mark, current_task_last_mark);
+
+                if (!may_be_true_granules.contains(static_cast<UInt32>(batch_end_mark)))
+                    break;
+
+                size_t mark_rows = std::min(index_granularity.getMarkRows(batch_end_mark), max_rows_to_read - read_rows - batch_rows);
+                batch_rows += mark_rows;
+                ++batch_end_mark;
+            }
 
             for (size_t i = 0; i < res_columns.size(); ++i)
             {
@@ -263,19 +285,19 @@ size_t MergeTreeReaderProjectionIndex::readRows(
                 if (is_always_true[i])
                 {
                     auto & column_data = assert_cast<ColumnUInt8 &>(column_mutable).getData();
-                    column_data.resize_fill(column_mutable.size() + rows_to_read, 1);
+                    column_data.resize_fill(column_mutable.size() + batch_rows, 1);
                 }
                 else
                 {
                     size_t col_offset_before = column_mutable.size();
-                    fillColumnLazy(column_mutable, columns_to_read[i].name, col_offset_before, from_row, rows_to_read);
+                    fillColumnLazy(column_mutable, columns_to_read[i].name, col_offset_before, from_row, batch_rows);
                 }
             }
-        }
 
-        ++from_mark;
-        from_row += rows_to_read;
-        read_rows += rows_to_read;
+            from_mark = batch_end_mark;
+            from_row += batch_rows;
+            read_rows += batch_rows;
+        }
     }
 
     current_mark = from_mark;
