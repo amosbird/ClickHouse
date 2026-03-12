@@ -48,6 +48,10 @@ private:
     /// Lazily-built cursor map, shared across all marks in the part.
     PostingListCursorMap cursor_map;
     bool cursor_map_built = false;
+
+    /// Cached settings values (read once in constructor, avoid per-mark Settings lookups).
+    bool want_lazy = false;
+    float density_threshold = 0;
 };
 
 }

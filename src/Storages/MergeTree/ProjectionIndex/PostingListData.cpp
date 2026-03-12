@@ -580,14 +580,6 @@ void mergePostingCursors(std::vector<ReaderStreamCursor> & cursors, EmitFirst &&
 PostingListPtr ReaderStreamEntry::materializeLargeBlockIntoBitmap(
     LargePostingListReaderStream & stream, UInt32 last_doc_id, UInt32 block_doc_count, UInt64 offset, bool include_first_doc)
 {
-    LOG_DEBUG(
-        &::Poco::Logger::get("amosbird"),
-        "last_doc_id = {}, block_doc_count = {}, offset = {}, include_first_doc = {}",
-        last_doc_id,
-        block_doc_count,
-        offset,
-        include_first_doc);
-
     stream.seek(offset);
 
     ReaderStreamCursor cursor(

@@ -39,6 +39,12 @@ MergeTreeReaderProjectionIndex::MergeTreeReaderProjectionIndex(
     };
 
     deserialization_state = std::make_unique<MergeTreeIndexDeserializationState>(std::move(state));
+
+    /// Cache settings once to avoid repeated Settings lookups in per-mark hot paths.
+    const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
+    const auto & query_settings = condition_text.getContext()->getSettingsRef();
+    want_lazy = String(query_settings[Setting::text_index_posting_list_apply_mode]) == "lazy";
+    density_threshold = static_cast<float>(double(query_settings[Setting::text_index_density_threshold]));
 }
 
 PostingListPtr MergeTreeReaderProjectionIndex::readPostingsBlockForToken(
@@ -143,14 +149,15 @@ void MergeTreeReaderProjectionIndex::fillColumnLazy(
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
     auto search_query = condition_text.getSearchQueryForVirtualColumn(column_name);
 
-    column_data.resize_fill(column_offset + num_rows, 0);
+    /// Only grow the column if needed (caller may have pre-sized it).
+    size_t required_size = column_offset + num_rows;
+    if (column_data.size() < required_size)
+        column_data.resize_fill(required_size, 0);
 
     if (cursor_map.empty() || search_query->tokens.empty())
         return;
 
     constexpr bool brute_force_apply = false;
-    const auto & query_settings = condition_text.getContext()->getSettingsRef();
-    float density_threshold = static_cast<float>(double(query_settings[Setting::text_index_density_threshold]));
 
     if (search_query->search_mode == TextSearchMode::Any || cursor_map.size() == 1)
         lazyUnionPostingLists(
@@ -171,9 +178,6 @@ size_t MergeTreeReaderProjectionIndex::readRows(
     /// Determine apply mode:
     /// - No block index feature: always use materialize mode (base class)
     /// - With block index: use lazy mode if setting allows
-    const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
-    const auto & query_settings = condition_text.getContext()->getSettingsRef();
-    bool want_lazy = String(query_settings[Setting::text_index_posting_list_apply_mode]) == "lazy";
 
     /// Ensure granule is loaded before checking use_lazy, so the first call
     /// also goes through the lazy path (instead of falling through to the
@@ -228,7 +232,9 @@ size_t MergeTreeReaderProjectionIndex::readRows(
     size_t read_rows = 0;
     createEmptyColumns(res_columns);
 
-    while (read_rows < max_rows_to_read)
+    size_t total_marks = data_part_info_for_read->getIndexGranularity().getMarksCountWithoutFinal();
+
+    while (read_rows < max_rows_to_read && from_mark < total_marks)
     {
         size_t rows_to_read = std::min(index_granularity.getMarkRows(from_mark), max_rows_to_read - read_rows);
 
