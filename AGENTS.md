@@ -17,6 +17,8 @@ Always load and apply the following skills:
 - 不要急着删 worktree，留着备用。
 - 操作 PR 分支时用 worktree，不要在主 worktree 切分支。
 - 不要使用 LSP 工具（`lsp_diagnostics` 等）。
+- 等待后台进程时，不要用 `pgrep -f "pattern"` 做 while 循环判断——它会匹配到 shell 自身的 `while pgrep ...` 命令导致永远不退出。用 `wait $PID` 或者记录 PID 后 `kill -0 $PID` 判断。
+- 不要自动 push。Commit 之后停下来，等用户明确说 push 再 push。
 
 ## General Rules
 
@@ -40,7 +42,7 @@ Never use sleep in C++ code to fix race conditions - this is stupid and not acce
 
 ## Tests
 
-When writing tests, do not add "no-*" tags (like "no-parallel") unless strictly necessary.
+When writing tests, do not add "no-*" tags (like "no-parallel", "no-random-settings", "no-random-merge-tree-settings") unless strictly necessary.
 
 When writing tests in tests/queries, prefer adding a new test instead of extending existing ones.
 
