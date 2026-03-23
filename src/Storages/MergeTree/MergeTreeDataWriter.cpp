@@ -1,6 +1,7 @@
 #include <memory>
 #include <Columns/ColumnConst.h>
 #include <Columns/ColumnsDateTime.h>
+#include <Columns/ColumnsNumber.h>
 #include <Core/Settings.h>
 #include <DataTypes/DataTypeDate.h>
 #include <DataTypes/DataTypeDateTime.h>
@@ -8,6 +9,7 @@
 #include <IO/HashingWriteBuffer.h>
 #include <IO/WriteHelpers.h>
 #include <Interpreters/AggregationCommon.h>
+#include <Storages/MergeTree/ProjectionOffsetIndex.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/ExpressionActions.h>
@@ -1077,7 +1079,38 @@ MergeTreeTemporaryPartPtr MergeTreeDataWriter::writeProjectionPartImpl(
 
     out->writeWithPermutation(block, perm_ptr);
     out->finalizeIndexGranularity();
-    auto finalizer = out->finalizePartAsync(new_data_part, IMergedBlockOutputStream::GatheredData{}, false);
+
+    /// Build per-granule bitmap index of `_parent_part_offset` values if the projection carries them.
+    IMergedBlockOutputStream::GatheredData gathered_data;
+    if (projection.with_parent_part_offset && block.has("_parent_part_offset"))
+    {
+        auto proj_index_granularity = out->getIndexGranularity();
+        const auto & offset_col = block.getByName("_parent_part_offset").column;
+        size_t num_rows = block.rows();
+
+        /// The block is in original (unsorted) order; the permutation was applied during writing.
+        /// We need to extract offsets in the permuted (sorted) order to match the granule layout on disk.
+        PaddedPODArray<UInt64> sorted_offsets(num_rows);
+        const auto * raw_offsets = assert_cast<const ColumnUInt64 &>(*offset_col).getData().data();
+        if (perm_ptr)
+        {
+            for (size_t i = 0; i < num_rows; ++i)
+                sorted_offsets[i] = raw_offsets[(*perm_ptr)[i]];
+        }
+        else
+        {
+            memcpy(sorted_offsets.data(), raw_offsets, num_rows * sizeof(UInt64));
+        }
+
+        ProjectionOffsetIndexWriter::write(
+            sorted_offsets.data(),
+            num_rows,
+            *proj_index_granularity,
+            new_data_part->getDataPartStorage(),
+            gathered_data.checksums);
+    }
+
+    auto finalizer = out->finalizePartAsync(new_data_part, std::move(gathered_data), false);
     temp_part->part = new_data_part;
     temp_part->streams.emplace_back(MergeTreeTemporaryPart::Stream{.stream = std::move(out), .finalizer = std::move(finalizer)});
 
