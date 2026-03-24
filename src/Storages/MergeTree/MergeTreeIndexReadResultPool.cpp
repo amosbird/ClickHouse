@@ -3,7 +3,6 @@
 #include <Storages/MergeTree/MergeTreeDataSelectExecutor.h>
 #include <Storages/MergeTree/MergeTreeReadPoolProjectionIndex.h>
 #include <Storages/MergeTree/MergeTreeSelectProcessor.h>
-#include <Storages/MergeTree/ProjectionOffsetIndex.h>
 
 namespace CurrentMetrics
 {
@@ -361,16 +360,6 @@ ProjectionIndexBitmapPtr SingleProjectionIndexReader::read(const RangesInDataPar
 {
     bool can_use_32bit_part_offset = ranges.parent_ranges.max_part_offset <= std::numeric_limits<UInt32>::max();
 
-    /// Fast path: if the projection part has a pre-built per-granule bitmap index, use it directly
-    /// instead of reading the `_parent_part_offset` column and running PREWHERE.
-    if (auto fast_result = ProjectionOffsetIndexReader::read(
-            ranges.data_part->getDataPartStorage(),
-            ranges.ranges,
-            ranges.parent_ranges,
-            ranges.parent_ranges.max_part_offset))
-        return fast_result;
-
-    /// Slow path: read the `_parent_part_offset` column chunk-by-chunk.
     auto task = projection_index_read_pool->getTask(ranges);
     MergeTreeProjectionIndexSelectAlgorithm algorithm;
     auto res = can_use_32bit_part_offset ? ProjectionIndexBitmap::create32() : ProjectionIndexBitmap::create64();
