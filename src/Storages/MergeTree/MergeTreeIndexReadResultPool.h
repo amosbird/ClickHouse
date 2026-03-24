@@ -113,6 +113,11 @@ struct ProjectionIndexBitmap
     ///
     /// Returns true if at least one value in the bitmap falls within the specified range.
     bool appendToFilter(PaddedPODArray<UInt8> & filter, size_t starting_row, size_t num_rows) const;
+
+    /// Given an index granularity and a set of mark ranges, removes marks whose entire row range
+    /// has no bits set in the bitmap (i.e. `rangeAllZero` returns true). Returns the narrowed mark ranges.
+    /// This is used to eliminate marks before distributing them to reader threads.
+    MarkRanges narrowMarkRanges(const MarkRanges & mark_ranges, const MergeTreeIndexGranularity & index_granularity) const;
 };
 
 class MergeTreeSelectProcessor;
@@ -199,6 +204,12 @@ public:
     /// This map uses raw pointer of data part as key because it is unique and stable for the lifetime of the part.
     MergeTreeIndexReadResultPtr getOrBuildIndexReadResult(const RangesInDataPart & part, const RangesInDataParts & projection_parts);
 
+    /// Eagerly builds the projection index bitmap for a given part and caches a partial MergeTreeIndexReadResult
+    /// (with only `projection_index_read_result` populated). Returns the bitmap, or nullptr if no projection index
+    /// reader is configured. The cached result will be reused by `getOrBuildIndexReadResult` — if a skip index reader
+    /// is also configured, it will augment the existing entry with skip index results.
+    ProjectionIndexBitmapPtr buildProjectionBitmap(const RangesInDataPart & part, const RangesInDataParts & projection_parts);
+
     /// Cleans up the cached MergeTreeIndexReadResult for a given part if it exists.
     /// Should be called when the last task for the part has finished.
     void clear(const DataPartPtr & part);
@@ -212,6 +223,12 @@ private:
     /// Stores MergeTreeIndexReadResult instances per part to avoid redundant construction.
     std::unordered_map<const IMergeTreeDataPart *, IndexReadResultEntry> index_read_result_registry;
     SharedMutex index_read_result_registry_mutex;
+
+    /// Stores projection index bitmaps that were eagerly built before task distribution.
+    /// Keyed by raw data part pointer. These are consumed by `getOrBuildIndexReadResult`
+    /// to avoid redundant projection index reads.
+    std::unordered_map<const IMergeTreeDataPart *, ProjectionIndexBitmapPtr> prebuilt_projection_bitmaps;
+    std::mutex prebuilt_projection_bitmaps_mutex;
 };
 
 using MergeTreeIndexReadResultPoolPtr = std::shared_ptr<MergeTreeIndexReadResultPool>;

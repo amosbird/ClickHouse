@@ -3465,6 +3465,36 @@ void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, cons
         MergeTreeIndexReadResultPoolPtr index_read_result_pool
             = std::make_shared<MergeTreeIndexReadResultPool>(std::move(skip_index_reader), std::move(projection_index_reader));
 
+        /// Eagerly build projection index bitmaps and use them to narrow mark ranges
+        /// before distributing tasks to reader threads. This avoids distributing marks
+        /// that the projection index would skip anyway, improving task scheduling efficiency.
+        for (auto & part_with_ranges : result.parts_with_ranges)
+        {
+            auto proj_it = projection_index_read_desc.read_ranges.find(part_with_ranges.part_index_in_query);
+            if (proj_it == projection_index_read_desc.read_ranges.end())
+                continue;
+
+            auto bitmap = index_read_result_pool->buildProjectionBitmap(part_with_ranges, proj_it->second);
+            if (!bitmap)
+                continue;
+
+            auto narrowed = bitmap->narrowMarkRanges(part_with_ranges.ranges, *part_with_ranges.data_part->index_granularity);
+            if (narrowed.size() < part_with_ranges.ranges.size()
+                || narrowed.getNumberOfMarks() < part_with_ranges.ranges.getNumberOfMarks())
+            {
+                LOG_DEBUG(log, "Projection index narrowed marks for part {} from {} to {} ({} ranges -> {} ranges)",
+                    part_with_ranges.data_part->name,
+                    part_with_ranges.ranges.getNumberOfMarks(),
+                    narrowed.getNumberOfMarks(),
+                    part_with_ranges.ranges.size(),
+                    narrowed.size());
+                part_with_ranges.ranges = std::move(narrowed);
+            }
+        }
+
+        /// Remove parts that have no remaining marks after narrowing.
+        std::erase_if(result.parts_with_ranges, [](const auto & p) { return p.ranges.empty(); });
+
         RangesByIndex read_ranges;
         PartRemainingMarks part_remaining_marks;
 

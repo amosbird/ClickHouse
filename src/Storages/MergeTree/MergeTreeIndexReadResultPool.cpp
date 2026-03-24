@@ -1,6 +1,7 @@
 #include <Storages/MergeTree/MergeTreeIndexReadResultPool.h>
 
 #include <Storages/MergeTree/MergeTreeDataSelectExecutor.h>
+#include <Storages/MergeTree/MergeTreeIndexGranularity.h>
 #include <Storages/MergeTree/MergeTreeReadPoolProjectionIndex.h>
 #include <Storages/MergeTree/MergeTreeSelectProcessor.h>
 
@@ -339,6 +340,49 @@ template void ProjectionIndexBitmap::add<UInt64>(UInt64 value);
 template void ProjectionIndexBitmap::addBulk<UInt32>(const UInt32 * values, size_t size);
 template void ProjectionIndexBitmap::addBulk<UInt64>(const UInt64 * values, size_t size);
 
+MarkRanges ProjectionIndexBitmap::narrowMarkRanges(
+    const MarkRanges & mark_ranges, const MergeTreeIndexGranularity & index_granularity) const
+{
+    MarkRanges result;
+
+    for (const auto & range : mark_ranges)
+    {
+        /// Track contiguous runs of non-zero marks to merge them into ranges.
+        size_t run_begin = 0;
+        bool in_run = false;
+
+        for (size_t mark = range.begin; mark < range.end; ++mark)
+        {
+            size_t row_begin = index_granularity.getMarkStartingRow(mark);
+            size_t row_end = row_begin + index_granularity.getMarkRows(mark);
+
+            bool has_data = !rangeAllZero(row_begin, row_end);
+
+            if (has_data)
+            {
+                if (!in_run)
+                {
+                    run_begin = mark;
+                    in_run = true;
+                }
+            }
+            else
+            {
+                if (in_run)
+                {
+                    result.emplace_back(run_begin, mark);
+                    in_run = false;
+                }
+            }
+        }
+
+        if (in_run)
+            result.emplace_back(run_begin, range.end);
+    }
+
+    return result;
+}
+
 SingleProjectionIndexReader::SingleProjectionIndexReader(
     std::shared_ptr<MergeTreeReadPoolProjectionIndex> pool,
     PrewhereInfoPtr prewhere_info,
@@ -459,6 +503,21 @@ MergeTreeIndexReadResultPool::MergeTreeIndexReadResultPool(
     chassert(skip_index_reader || projection_index_reader);
 }
 
+ProjectionIndexBitmapPtr
+MergeTreeIndexReadResultPool::buildProjectionBitmap(const RangesInDataPart & part, const RangesInDataParts & projection_parts)
+{
+    if (!projection_index_reader)
+        return nullptr;
+
+    auto bitmap = projection_index_reader->read(projection_parts);
+    if (bitmap)
+    {
+        std::lock_guard lock(prebuilt_projection_bitmaps_mutex);
+        prebuilt_projection_bitmaps.emplace(part.data_part.get(), bitmap);
+    }
+    return bitmap;
+}
+
 MergeTreeIndexReadResultPtr
 MergeTreeIndexReadResultPool::getOrBuildIndexReadResult(const RangesInDataPart & part, const RangesInDataParts & projection_parts)
 {
@@ -482,7 +541,25 @@ MergeTreeIndexReadResultPool::getOrBuildIndexReadResult(const RangesInDataPart &
                 }
             }
 
-            if (projection_index_reader)
+            /// Check if a projection bitmap was already eagerly built.
+            ProjectionIndexBitmapPtr prebuilt_bitmap;
+            {
+                std::lock_guard prebuilt_lock(prebuilt_projection_bitmaps_mutex);
+                auto prebuilt_it = prebuilt_projection_bitmaps.find(part.data_part.get());
+                if (prebuilt_it != prebuilt_projection_bitmaps.end())
+                {
+                    prebuilt_bitmap = prebuilt_it->second;
+                    prebuilt_projection_bitmaps.erase(prebuilt_it);
+                }
+            }
+
+            if (prebuilt_bitmap)
+            {
+                if (!res)
+                    res = std::make_shared<MergeTreeIndexReadResult>();
+                res->projection_index_read_result = std::move(prebuilt_bitmap);
+            }
+            else if (projection_index_reader)
             {
                 auto projection_index_res = projection_index_reader->read(projection_parts);
                 if (projection_index_res)
