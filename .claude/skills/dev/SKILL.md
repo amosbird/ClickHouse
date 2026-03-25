@@ -167,6 +167,12 @@ Multiple worktrees can be built in parallel. Each worktree is fully isolated:
 - **Unique container name**: `build-<worktree-name>` (assigned automatically by `build.sh`)
 - **Shared ccache**: All builds share the same ccache directory (`cache/ccache/`). ccache 4.12.3 supports concurrent multi-process access.
 
+## Working in a Worktree
+
+When working inside a worktree, **always search inside the worktree directory first**, not the main repo root. The worktree may have different code from the main repo (feature branch changes, different upstream base). This applies to all code exploration: grep, glob, file reads, etc.
+
+For example, if the worktree is at `/tmp/gentoo/home/amos/git/ClickHouse/my-feature/`, search for code in that directory, not in `/tmp/gentoo/home/amos/git/ClickHouse/src/`.
+
 ## Critical Warnings
 
 - Do NOT use `-j` with ninja (let it decide automatically)

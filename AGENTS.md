@@ -38,6 +38,8 @@ When writing messages, say ASan, not ASAN, and similar (because there are two wo
 
 When writing C++ code, always use Allman-style braces (opening brace on a new line). This is enforced by the style check in CI.
 
+Code line width can be up to 120 characters.
+
 Never use sleep in C++ code to fix race conditions - this is stupid and not acceptable!
 
 ## Tests
