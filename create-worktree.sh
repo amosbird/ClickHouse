@@ -76,22 +76,51 @@ if [[ -d "$WORKTREE_PATH" ]]; then
     exit 1
 fi
 
+# Determine target ref now so we can choose a better source worktree for submodule reuse.
+LOCAL_BRANCH="$(git -C "$SCRIPT_DIR" branch --list "$BRANCH" | tr -d '* ')"
+REMOTE_BRANCH="$(git -C "$SCRIPT_DIR" branch --list -r "origin/$BRANCH" | tr -d ' ')"
+
+if [[ -n "$LOCAL_BRANCH" ]]; then
+    TARGET_REF="$BRANCH"
+elif [[ -n "$REMOTE_BRANCH" ]]; then
+    TARGET_REF="origin/$BRANCH"
+else
+    TARGET_REF="$BASE_REF"
+fi
+
+TARGET_COMMIT="$(git -C "$SCRIPT_DIR" rev-parse "$TARGET_REF")"
+TARGET_GITMODULES_BLOB="$(git -C "$SCRIPT_DIR" rev-parse "$TARGET_REF:.gitmodules" 2>/dev/null || true)"
+
 # --- Find source worktree with initialized submodules ---
 # We need a worktree that has modules/ set up (i.e., submodules initialized).
-# Prefer the one with the most modules (most complete submodule set).
+# Prefer worktrees that match target commit layout, then prefer larger module sets.
 GIT_COMMON_DIR="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir)"
 GIT_COMMON_DIR="$(cd "$SCRIPT_DIR" && cd "$GIT_COMMON_DIR" && pwd)"
 
 SOURCE_MODULES=""
 SOURCE_ENTRY=""
 BEST_COUNT=0
+BEST_MATCH_LEVEL=-1
 for entry_dir in "$GIT_COMMON_DIR"/worktrees/*/; do
     entry="$(basename "$entry_dir")"
     if [[ -d "$entry_dir/modules" ]]; then
         # Count modules (dirs with HEAD file = actual git repos)
         count="$(find "$entry_dir/modules" -name HEAD -maxdepth 3 | wc -l)"
-        if [[ "$count" -gt "$BEST_COUNT" ]]; then
+
+        entry_head="$(git --git-dir "$entry_dir" rev-parse HEAD 2>/dev/null || true)"
+        entry_gitmodules_blob="$(git --git-dir "$entry_dir" rev-parse "HEAD:.gitmodules" 2>/dev/null || true)"
+
+        # 2: exact superproject commit match, 1: exact .gitmodules layout match, 0: fallback.
+        match_level=0
+        if [[ -n "$entry_head" ]] && [[ "$entry_head" == "$TARGET_COMMIT" ]]; then
+            match_level=2
+        elif [[ -n "$TARGET_GITMODULES_BLOB" ]] && [[ -n "$entry_gitmodules_blob" ]] && [[ "$entry_gitmodules_blob" == "$TARGET_GITMODULES_BLOB" ]]; then
+            match_level=1
+        fi
+
+        if [[ "$match_level" -gt "$BEST_MATCH_LEVEL" ]] || { [[ "$match_level" -eq "$BEST_MATCH_LEVEL" ]] && [[ "$count" -gt "$BEST_COUNT" ]]; }; then
             BEST_COUNT="$count"
+            BEST_MATCH_LEVEL="$match_level"
             SOURCE_MODULES="$entry_dir/modules"
             SOURCE_ENTRY="$entry"
         fi
@@ -105,6 +134,13 @@ if [[ -z "$SOURCE_MODULES" ]]; then
 fi
 
 echo "Using submodule data from worktree: $SOURCE_ENTRY ($BEST_COUNT modules)"
+if [[ "$BEST_MATCH_LEVEL" -eq 2 ]]; then
+    echo "  Source match: exact commit ($TARGET_REF)"
+elif [[ "$BEST_MATCH_LEVEL" -eq 1 ]]; then
+    echo "  Source match: exact .gitmodules layout ($TARGET_REF)"
+else
+    echo "  Source match: best-effort by module coverage"
+fi
 
 # Determine source worktree's working directory path from its gitdir file.
 # The gitdir file contains the path to the source worktree's .git file.
@@ -120,10 +156,6 @@ fi
 echo "=== Creating worktree ==="
 echo "  Branch: $BRANCH"
 echo "  Path:   $WORKTREE_PATH"
-
-# Check if branch exists locally or on remote
-LOCAL_BRANCH="$(git -C "$SCRIPT_DIR" branch --list "$BRANCH" | tr -d '* ')"
-REMOTE_BRANCH="$(git -C "$SCRIPT_DIR" branch --list -r "origin/$BRANCH" | tr -d ' ')"
 
 t0=$(date +%s%3N)
 
@@ -256,10 +288,24 @@ if [[ -s "$FALLBACK_LIST" ]]; then
     echo "=== Fetching $FALLBACK_COUNT submodule(s) with missing commits ==="
     while IFS= read -r sub; do
         echo "  Fetching: $sub"
-        git -C "$WORKTREE_PATH" submodule update --init -- "$sub" 2>&1 | sed 's/^/    /'
+        git -C "$WORKTREE_PATH" submodule sync --recursive -- "$sub" 2>&1 | sed 's/^/    /'
+        git -C "$WORKTREE_PATH" submodule update --init --recursive -- "$sub" 2>&1 | sed 's/^/    /'
     done <"$FALLBACK_LIST"
 fi
 rm -f "$FALLBACK_LIST"
+
+# --- Step 8: Verify nested submodules and repair if needed ---
+# A source worktree with a different submodule topology can leave stale nested worktree paths
+# after hardlink copy. Validate recursive access and repair with a full recursive sync/update.
+echo "=== Verifying recursive submodules ==="
+if ! git -C "$WORKTREE_PATH" submodule foreach --recursive "git rev-parse --git-dir >/dev/null" >/dev/null 2>&1; then
+    echo "  Detected inconsistent nested submodule checkout, running recursive repair..."
+    git -C "$WORKTREE_PATH" submodule sync --recursive
+    git -C "$WORKTREE_PATH" submodule update --init --recursive --jobs "$NCPU"
+    echo "  Recursive repair complete"
+else
+    echo "  Recursive submodules look consistent"
+fi
 
 # --- Done ---
 echo ""

@@ -86,6 +86,7 @@ fi
 
 # Resolve to absolute path
 WORKTREE_PATH="$(cd "$WORKTREE_PATH" && pwd)"
+WORKTREE_REALPATH="$(readlink -f "$WORKTREE_PATH")"
 WORKTREE_NAME="$(basename "$WORKTREE_PATH")"
 
 # --- Build type → cmake flags ---
@@ -202,6 +203,15 @@ DOCKER_ARGS=(
     --user "$(id -u):$(id -g)"
     --network=host
     --volume "$WORKTREE_PATH:/ClickHouse"
+    # Keep the original absolute worktree path visible in the container.
+    # Submodule gitdirs in worktrees store core.worktree as an absolute host path
+    # (for example /data2/worktrees/<name>/contrib/<submodule>), and git commands
+    # invoked by CMake need that path to exist.
+    --volume "$WORKTREE_PATH:$WORKTREE_PATH"
+    # Worktree submodules may store a physical path in core.worktree (for example
+    # /data2/worktrees/<name>), while WORKTREE_PATH can be a symlink path under
+    # /tmp/...; mount both so git in submodules can resolve either one.
+    --volume "$WORKTREE_REALPATH:$WORKTREE_REALPATH"
     --volume "$CCACHE_BIN:/usr/local/bin/ccache:ro"
     --volume "$CCACHE_DIR:/ccache"
     "${EXTRA_DOCKER_ARGS[@]}"

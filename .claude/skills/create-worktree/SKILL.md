@@ -47,11 +47,14 @@ ln -s /data2/worktrees/backport backport
 ## What the script does
 
 1. **Creates git worktree** (~3s for 35,958 files)
-2. **Hardlink-copies submodule git data** from the most complete existing worktree (~200ms–1.2s)
+2. **Hardlink-copies submodule git data** from the best-matching existing worktree (~200ms–1.2s)
+   - Source selection priority: exact target commit > exact `.gitmodules` layout > largest module coverage
 3. **Fixes config paths** — replaces source worktree paths with new worktree paths in all submodule configs (~50–200ms)
 4. **Writes `.git` pointer files** for all 129 submodules (~700ms)
    - Handles the 3 aws sub-submodules (`aws-c-common`, `aws-c-event-stream`, `aws-checksums`) that use `modules/<name>` instead of `modules/contrib/<name>`
 5. **Parallel checkout** of all submodule working trees using `xargs -P` (~14s)
+6. **Fallback + repair for missing/inconsistent nested submodules**
+   - Runs recursive `submodule sync` + `submodule update --init --recursive` when needed, so nested trees (for example under `contrib/aws`) are consistent
 
 **Total: ~20 seconds** (vs 55+ seconds with `git submodule update`)
 
