@@ -1103,16 +1103,13 @@ void MergeTreeData::checkProperties(
                 true /* allow_nullable_key */,
                 local_context);
 
-            if (projection.index_granularity || projection.index_granularity_bytes)
+            if (!canUseAdaptiveGranularity() && projection.has_index_granularity_overrides)
             {
-                if (!canUseAdaptiveGranularity())
-                {
-                    throw Exception(
-                        ErrorCodes::SUPPORT_IS_DISABLED,
-                        "Projection {} specifies index_granularity-related overrides, but the parent table uses fixed granularity. "
-                        "Such overrides are supported with adaptive granularity (e.g. index_granularity_bytes > 0)",
-                        projection.name);
-                }
+                throw Exception(
+                    ErrorCodes::SUPPORT_IS_DISABLED,
+                    "Projection {} specifies index_granularity-related overrides, but the parent table uses fixed granularity. "
+                    "Such overrides are supported with adaptive granularity (e.g. index_granularity_bytes > 0)",
+                    projection.name);
             }
             projections_names.insert(projection.name);
         }
@@ -4824,7 +4821,7 @@ MergeTreeDataPartFormat MergeTreeData::choosePartFormat(
     using PartStorageType = MergeTreeDataPartStorageType;
 
     String out_reason;
-    const auto settings = getSettings(projection);
+    const auto settings = getSettings(projection ? &projection->settings_changes : nullptr);
     if (!canUsePolymorphicParts(*settings, out_reason))
         return {PartType::Wide, PartStorageType::Full};
 
@@ -10491,23 +10488,17 @@ MergeTreeData::PartitionIdToMinBlockPtr MergeTreeData::getMinDataVersionForEachP
     return std::make_shared<PartitionIdToMinBlock>(std::move(partition_to_min_data_version));
 }
 
-MergeTreeSettingsPtr MergeTreeData::getSettings(ProjectionDescriptionRawPtr projection) const
+MergeTreeSettingsPtr MergeTreeData::getSettings(const SettingsChanges * settings_changes) const
 {
     auto data_settings = storage_settings.get();
-    if (projection)
+
+    if (settings_changes && !settings_changes->empty())
     {
-        if ((projection->index_granularity && (*projection->index_granularity != (*data_settings)[MergeTreeSetting::index_granularity]))
-            || (projection->index_granularity_bytes
-                && (*projection->index_granularity_bytes != (*data_settings)[MergeTreeSetting::index_granularity_bytes])))
-        {
-            auto new_data_settings = std::make_shared<MergeTreeSettings>(*data_settings);
-            if (projection->index_granularity)
-                (*new_data_settings)[MergeTreeSetting::index_granularity] = *projection->index_granularity;
-            if (projection->index_granularity_bytes)
-                (*new_data_settings)[MergeTreeSetting::index_granularity_bytes] = *projection->index_granularity_bytes;
-            data_settings = new_data_settings;
-        }
+        auto new_data_settings = std::make_shared<MergeTreeSettings>(*data_settings);
+        new_data_settings->applyChanges(*settings_changes);
+        return new_data_settings;
     }
+
     return data_settings;
 }
 
