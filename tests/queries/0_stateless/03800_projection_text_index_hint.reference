@@ -1,0 +1,15 @@
+-- splitByNonAlpha
+1
+Prewhere filter column: and(__text_index_idx_equals_bd435c844cedc4f9bd02f62fd38c35ef, equals(__table1.s, \'5555\'_String)) (removed)
+19
+Filter column: like(__table1.s, \'%5555%\'_String) (removed)
+-- array
+1
+Filter column: equals(__table1.s, \'5555\'_String) (removed)
+19
+Filter column: like(__table1.s, \'%5555%\'_String) (removed)
+-- ngrams(3)
+1
+Prewhere filter column: and(__text_index_idx_equals_6315d1ed5df88795d0beba701d2b3f7a, equals(__table1.s, \'5555\'_String)) (removed)
+19
+Prewhere filter column: and(__text_index_idx_like_e4e4354e8a0ca24be44af5f1cbf9914b, like(__table1.s, \'%5555%\'_String)) (removed)

@@ -1249,10 +1249,15 @@ public:
     /// Get column types required for partition key
     static DataTypes getMinMaxColumnsTypes(const KeyDescription & partition_key);
 
-    ExpressionActionsPtr
-    getPrimaryKeyAndSkipIndicesExpression(const StorageMetadataPtr & metadata_snapshot, const MergeTreeIndices & indices) const;
-    ExpressionActionsPtr
-    getSortingKeyAndSkipIndicesExpression(const StorageMetadataPtr & metadata_snapshot, const MergeTreeIndices & indices) const;
+    ExpressionActionsPtr getPrimaryKeyAndIndicesExpression(
+        const StorageMetadataPtr & metadata_snapshot,
+        const MergeTreeIndices & indices,
+        const std::vector<ProjectionDescriptionRawPtr> & projection_indices) const;
+
+    ExpressionActionsPtr getSortingKeyAndIndicesExpression(
+        const StorageMetadataPtr & metadata_snapshot,
+        const MergeTreeIndices & indices,
+        const std::vector<ProjectionDescriptionRawPtr> & projection_indices) const;
 
     /// Get compression codec for part according to TTL rules and <compression>
     /// section from config.xml.

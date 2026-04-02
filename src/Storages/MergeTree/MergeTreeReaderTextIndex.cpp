@@ -1,21 +1,23 @@
 #include <Columns/ColumnsCommon.h>
+#include <Columns/ColumnsNumber.h>
+#include <Core/Settings.h>
 #include <IO/ReadHelpers.h>
-#include <Storages/MergeTree/MergeTreeIndexText.h>
-#include <Storages/MergeTree/MergeTreeReaderTextIndex.h>
+#include <Interpreters/Context.h>
 #include <Storages/MergeTree/LoadedMergeTreeDataPartInfoForReader.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
-#include <Storages/MergeTree/TextIndexUtils.h>
-#include <Interpreters/Context.h>
-#include <Common/logger_useful.h>
-#include <Columns/ColumnsNumber.h>
+#include <Storages/MergeTree/MergeTreeIndexText.h>
+#include <Storages/MergeTree/MergeTreeReaderTextIndex.h>
+#include <Storages/MergeTree/ProjectionIndex/MergeTreeIndexProjection.h>
+#include <Storages/MergeTree/ProjectionIndex/MergeTreeReaderProjectionIndex.h>
 #include <Storages/MergeTree/TextIndexCache.h>
-#include <Core/Settings.h>
+#include <Storages/MergeTree/TextIndexUtils.h>
+#include <Common/logger_useful.h>
 
 namespace ProfileEvents
 {
-    extern const Event TextIndexReaderTotalMicroseconds;
-    extern const Event TextIndexUseHint;
-    extern const Event TextIndexDiscardHint;
+extern const Event TextIndexReaderTotalMicroseconds;
+extern const Event TextIndexUseHint;
+extern const Event TextIndexDiscardHint;
 }
 
 namespace DB
@@ -23,43 +25,60 @@ namespace DB
 
 namespace Setting
 {
-    extern const SettingsFloat text_index_hint_max_selectivity;
+extern const SettingsFloat text_index_hint_max_selectivity;
 }
 
 namespace ErrorCodes
 {
-    extern const int LOGICAL_ERROR;
-    extern const int NOT_IMPLEMENTED;
+extern const int LOGICAL_ERROR;
+extern const int NOT_IMPLEMENTED;
+}
+
+namespace
+{
+PostingListCodecPtr getPostingListCodecFromIndex(const IMergeTreeIndex & index)
+{
+    if (index.isProjectionIndex())
+        return typeid_cast<const MergeTreeIndexProjection &>(index).text_index->getPostingListCodec();
+    return typeid_cast<const MergeTreeIndexText &>(index).getPostingListCodec();
+}
 }
 
 MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
-    const IMergeTreeReader * main_reader_,
-    MergeTreeIndexWithCondition index_,
-    NamesAndTypesList columns_,
-    bool can_skip_mark_)
+    const IMergeTreeReader * main_reader_, MergeTreeIndexWithCondition index_, NamesAndTypesList columns_, bool can_skip_mark_)
     : IMergeTreeReader(
-        main_reader_->data_part_info_for_read,
-        columns_,
-        /*virtual_fields=*/ {},
-        main_reader_->storage_snapshot,
-        main_reader_->storage_settings,
-        Context::getGlobalContextInstance()->getIndexUncompressedCache().get(),
-        Context::getGlobalContextInstance()->getIndexMarkCache().get(),
-        main_reader_->all_mark_ranges,
-        main_reader_->settings)
+          main_reader_->data_part_info_for_read,
+          columns_,
+          /*virtual_fields=*/{},
+          main_reader_->storage_snapshot,
+          main_reader_->storage_settings,
+          Context::getGlobalContextInstance()->getIndexUncompressedCache().get(),
+          Context::getGlobalContextInstance()->getIndexMarkCache().get(),
+          main_reader_->all_mark_ranges,
+          main_reader_->settings)
     , index(std::move(index_))
     , can_skip_mark(can_skip_mark_)
-    , postings_serialization(typeid_cast<const MergeTreeIndexText &>(*index.index).getPostingListCodec())
+    , postings_serialization(getPostingListCodecFromIndex(*index.index))
 {
     for (const auto & column : columns_)
     {
         if (!column.name.starts_with(TEXT_INDEX_VIRTUAL_COLUMN_PREFIX) || !WhichDataType(column.type).isUInt8())
         {
-            throw Exception(ErrorCodes::LOGICAL_ERROR,
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
                 "Column {} with type {} should not be filled by text index reader",
-                column.name, column.type->getName());
+                column.name,
+                column.type->getName());
         }
     }
+
+    initializeIndexStreams();
+}
+
+void MergeTreeReaderTextIndex::initializeIndexStreams()
+{
+    if (index.index->isProjectionIndex())
+        return;
 
     auto data_part = getDataPart();
     auto substreams = index.index->getSubstreams();
@@ -80,8 +99,7 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
     auto index_format = index.index->getDeserializedFormat(data_part->checksums, index.index->getFileName());
     chassert(index_format);
 
-    MergeTreeIndexDeserializationState state
-    {
+    MergeTreeIndexDeserializationState state{
         .version = index_format.version,
         .condition = index.condition.get(),
         .part = *data_part,
@@ -124,6 +142,14 @@ MergeTreeDataPartPtr MergeTreeReaderTextIndex::getDataPart() const
 
 void MergeTreeReaderTextIndex::readGranule()
 {
+    if (index.index->isProjectionIndex())
+    {
+        MergeTreeIndexInputStreams empty_streams;
+        granule = index.index->createIndexGranule();
+        granule->deserializeBinaryWithMultipleStreams(empty_streams, *deserialization_state);
+        return;
+    }
+
     if (!is_prefetched)
         sparse_index_stream->seekToStart();
 
@@ -143,7 +169,7 @@ void MergeTreeReaderTextIndex::analyzeTokensCardinality()
 {
     is_always_true.resize(columns_to_read.size(), false);
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
-    const auto & granule_text = assert_cast<MergeTreeIndexGranuleText &>(*granule);
+    const auto & granule_text = dynamic_cast<MergeTreeIndexGranuleText &>(*granule);
     const auto & remaining_tokens = granule_text.getRemainingTokens();
 
     for (size_t i = 0; i < columns_to_read.size(); ++i)
@@ -183,7 +209,10 @@ void MergeTreeReaderTextIndex::analyzeTokensCardinality()
 
 void MergeTreeReaderTextIndex::initializePostingStreams()
 {
-    const auto & granule_text = assert_cast<MergeTreeIndexGranuleText &>(*granule);
+    if (index.index->isProjectionIndex())
+        return;
+
+    const auto & granule_text = dynamic_cast<MergeTreeIndexGranuleText &>(*granule);
     const auto & remaining_tokens = granule_text.getRemainingTokens();
 
     auto data_part = getDataPart();
@@ -225,8 +254,7 @@ bool MergeTreeReaderTextIndex::canSkipMark(size_t mark, size_t)
         initializePostingStreams();
     }
 
-    auto & granule_text = assert_cast<MergeTreeIndexGranuleText &>(*granule);
-    granule_text.setCurrentRange(*rows_range);
+    granule->setCurrentRange(*rows_range);
     bool may_be_true = index.condition->mayBeTrueOnGranule(granule, nullptr);
 
     if (may_be_true)
@@ -340,7 +368,8 @@ void MergeTreeReaderTextIndex::createEmptyColumns(Columns & columns) const
     }
 }
 
-double MergeTreeReaderTextIndex::estimateCardinality(const TextSearchQuery & query, const TokenToPostingsInfosMap & remaining_tokens, size_t total_rows) const
+double MergeTreeReaderTextIndex::estimateCardinality(
+    const TextSearchQuery & query, const TokenToPostingsInfosMap & remaining_tokens, size_t total_rows) const
 {
     chassert(!query.tokens.empty());
 
@@ -350,8 +379,7 @@ double MergeTreeReaderTextIndex::estimateCardinality(const TextSearchQuery & que
     /// Sets Ai stand for the posting lists of the searched tokens.
     switch (query.search_mode)
     {
-        case TextSearchMode::All:
-        {
+        case TextSearchMode::All: {
             /// Estimate the cardinality of the intersection of the sets.
             /// Assume each set Ai has known size |Ai|, and all sets are chosen
             /// independently and uniformly at random from the universe E of size N.
@@ -377,8 +405,7 @@ double MergeTreeReaderTextIndex::estimateCardinality(const TextSearchQuery & que
             log_cardinality -= static_cast<double>(query.tokens.size() - 1) * std::log(static_cast<double>(total_rows));
             return std::exp(log_cardinality);
         }
-        case TextSearchMode::Any:
-        {
+        case TextSearchMode::Any: {
             /// Estimate the cardinality of the union of the sets.
             /// The same as above the probability that a particular element appears in set Ai is pi = |Ai|/N
             /// The probability that element is not in set Ai is 1 - pi
@@ -420,7 +447,7 @@ PostingsMap MergeTreeReaderTextIndex::readPostingsIfNeeded(size_t mark)
     if (!rows_range.has_value())
         return {};
 
-    auto & granule_text = assert_cast<MergeTreeIndexGranuleText &>(*granule);
+    auto & granule_text = dynamic_cast<MergeTreeIndexGranuleText &>(*granule);
     const auto & remaining_tokens = granule_text.getRemainingTokens();
     PostingsMap result;
 
@@ -451,13 +478,27 @@ PostingsMap MergeTreeReaderTextIndex::readPostingsIfNeeded(size_t mark)
     return result;
 }
 
-std::vector<PostingListPtr> MergeTreeReaderTextIndex::readPostingsBlocksForToken(std::string_view token, const TokenPostingsInfo & token_info, const RowsRange & range)
+PostingListPtr MergeTreeReaderTextIndex::readPostingsBlockForToken(
+    std::string_view token, const TokenPostingsInfo & token_info, size_t block_idx, const String & index_id)
 {
-    auto & granule_text = assert_cast<MergeTreeIndexGranuleText &>(*granule);
+    auto * postings_stream = large_postings_streams.at(token).get();
+    return MergeTreeIndexGranuleText::readPostingsBlock(
+        *postings_stream, *deserialization_state, token_info, block_idx, postings_serialization, index_id);
+}
+
+std::vector<PostingListPtr>
+MergeTreeReaderTextIndex::readPostingsBlocksForToken(std::string_view token, const TokenPostingsInfo & token_info, const RowsRange & range)
+{
+    auto & granule_text = dynamic_cast<MergeTreeIndexGranuleText &>(*granule);
     auto read_postings = granule_text.getPostingsForRareToken(token);
 
     if (read_postings)
         return {read_postings};
+
+    /// Embedded postings (small cardinality tokens) are materialized as a Roaring bitmap
+    /// in the token info itself. Return directly — they have no large posting blocks.
+    if (token_info.embedded_postings)
+        return {token_info.embedded_postings};
 
     auto blocks_to_read = token_info.getBlocksToRead(range);
     std::vector<PostingListPtr> token_postings;
@@ -468,10 +509,7 @@ std::vector<PostingListPtr> MergeTreeReaderTextIndex::readPostingsBlocksForToken
         auto [it, inserted] = postings_blocks[token].try_emplace(block_idx);
 
         if (inserted)
-        {
-            auto * postings_stream = large_postings_streams.at(token).get();
-            it->second = MergeTreeIndexGranuleText::readPostingsBlock(*postings_stream, *deserialization_state, token_info, block_idx, postings_serialization, granule_text.getIndexIdForCaches());
-        }
+            it->second = readPostingsBlockForToken(token, token_info, block_idx, granule_text.getIndexIdForCaches());
 
         token_postings.push_back(it->second);
     }
@@ -481,7 +519,7 @@ std::vector<PostingListPtr> MergeTreeReaderTextIndex::readPostingsBlocksForToken
 
 void MergeTreeReaderTextIndex::cleanupPostingsBlocks(const RowsRange & range)
 {
-    const auto & granule_text = assert_cast<const MergeTreeIndexGranuleText &>(*granule);
+    const auto & granule_text = dynamic_cast<const MergeTreeIndexGranuleText &>(*granule);
     const auto & remaining_tokens = granule_text.getRemainingTokens();
 
     for (const auto & [token, token_info] : remaining_tokens)
@@ -589,7 +627,8 @@ void applyPostingsAll(
     }
 }
 
-void MergeTreeReaderTextIndex::fillColumn(IColumn & column, const String & column_name, PostingsMap & postings, size_t row_offset, size_t num_rows)
+void MergeTreeReaderTextIndex::fillColumn(
+    IColumn & column, const String & column_name, PostingsMap & postings, size_t row_offset, size_t num_rows)
 {
     auto & column_data = assert_cast<ColumnUInt8 &>(column).getData();
     const auto & condition_text = assert_cast<const MergeTreeIndexConditionText &>(*index.condition);
@@ -615,6 +654,8 @@ MergeTreeReaderPtr createMergeTreeReaderTextIndex(
     const NamesAndTypesList & columns_to_read,
     bool can_skip_mark)
 {
+    if (index.index->isProjectionIndex())
+        return std::make_unique<MergeTreeReaderProjectionIndex>(main_reader, index, columns_to_read, can_skip_mark);
     return std::make_unique<MergeTreeReaderTextIndex>(main_reader, index, columns_to_read, can_skip_mark);
 }
 

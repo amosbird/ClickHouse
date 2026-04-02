@@ -22,9 +22,10 @@ using MergeTreeSettingsPtr = std::shared_ptr<const MergeTreeSettings>;
 
 using WrittenOffsetSubstreams = std::set<std::string>;
 
-Block getIndexBlockAndPermute(const Block & block, const Names & names, const IColumnPermutation * permutation, Block * permuted_columns_cache = nullptr);
+Block getIndexBlockAndPermute(
+    const Block & source_block, const Names & names, const IColumnPermutation * permutation, Block * permuted_columns_cache);
 
-Block permuteBlockIfNeeded(const Block & block, const IColumnPermutation * permutation, Block * permuted_columns_cache = nullptr);
+Block permuteBlockIfNeeded(const Block & block, const IColumnPermutation * permutation, Block * permuted_columns_cache);
 
 /// Writes data part to disk in different formats.
 /// Calculates and serializes primary and skip indices if needed.

@@ -2,6 +2,7 @@
 
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
+#include <Storages/MergeTree/ProjectionIndex/PostingListData.h>
 #include <Columns/IColumn.h>
 #include <Common/Logger.h>
 #include <Common/HashTable/HashMap.h>
@@ -79,6 +80,7 @@ struct MergeTreeIndexTextParams
     size_t dictionary_block_frontcoding_compression = 1;
     size_t posting_list_block_size = 1024 * 1024;
     ASTPtr preprocessor;
+    bool has_block_index = true;
 };
 
 using PostingList = roaring::Roaring;
@@ -169,18 +171,6 @@ private:
     std::vector<char> deserialization_buffer;
 };
 
-/// Closed range of rows.
-struct RowsRange
-{
-    size_t begin;
-    size_t end;
-
-    RowsRange() = default;
-    RowsRange(size_t begin_, size_t end_) : begin(begin_), end(end_) {}
-
-    bool intersects(const RowsRange & other) const;
-};
-
 /// Stores information about posting list for a token.
 struct TokenPostingsInfo
 {
@@ -189,7 +179,7 @@ struct TokenPostingsInfo
 
     /// The majority of tokens have only one block,
     /// so use inlined vector to avoid heap allocations.
-    absl::InlinedVector<UInt64, 1> offsets;
+    absl::InlinedVector<LargePostingBlockMeta, 1> offsets;
     absl::InlinedVector<RowsRange, 1> ranges;
     PostingListPtr embedded_postings;
 
@@ -281,7 +271,7 @@ struct TextIndexSerialization
 
 
 /// Text index granule created on reading of the index.
-struct MergeTreeIndexGranuleText final : public IMergeTreeIndexGranule
+struct MergeTreeIndexGranuleText : public IMergeTreeIndexGranule
 {
 public:
     using TokenToPostingsMap = absl::flat_hash_map<std::string_view, PostingListPtr>;
@@ -304,7 +294,7 @@ public:
 
     const TokenToPostingsInfosMap & getRemainingTokens() const { return remaining_tokens; }
     PostingListPtr getPostingsForRareToken(std::string_view token) const;
-    void setCurrentRange(RowsRange range) { current_range = std::move(range); }
+    void setCurrentRange(RowsRange range) override { current_range = std::move(range); }
     const String & getIndexIdForCaches() const { return index_id_for_caches; }
 
     static PostingListPtr readPostingsBlock(
@@ -315,7 +305,7 @@ public:
         PostingsSerialization & postings_serialization,
         const String & index_id_for_caches);
 
-private:
+protected:
     /// Reads dictionary blocks and analyzes them for tokens.
     void analyzeDictionary(MergeTreeIndexReaderStream & header_stream, MergeTreeIndexReaderStream & dictionary_stream, MergeTreeIndexDeserializationState & state);
     /// Fills tokens and their infos from the cache.

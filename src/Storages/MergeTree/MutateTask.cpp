@@ -1662,20 +1662,33 @@ void PartMergerWriter::createBuildTextIndexesTask()
 
 void PartMergerWriter::calculateProjection(size_t projection_idx, const Block & block, UInt64 starting_offset)
 {
-    Block block_to_squash = ctx->projections_to_build[projection_idx]->calculate(block, starting_offset, ctx->context);
+    const auto & projection = *ctx->projections_to_build[projection_idx];
+    Block block_to_squash = projection.calculate(block, starting_offset, ctx->context);
 
     /// Everything is deleted by lightweight delete
     if (block_to_squash.rows() == 0)
         return;
 
-    projection_squashes[projection_idx].setHeader(block_to_squash.cloneEmpty());
-    projection_squashes[projection_idx].add({block_to_squash.getColumns(), block_to_squash.rows()});
-    Chunk squashed_chunk = Squashing::squash(
-        projection_squashes[projection_idx].generate(),
-        projection_squashes[projection_idx].getHeader());
+    if (projection.index)
+    {
+        auto tmp_part = MergeTreeDataWriter::writeTempProjectionPart(
+            *ctx->data, ctx->log, block_to_squash, projection, ctx->new_data_part.get(), ++projection_block_num);
 
-    if (squashed_chunk)
-        writeTempProjectionPart(projection_idx, std::move(squashed_chunk));
+        tmp_part->finalize();
+        tmp_part->part->getDataPartStorage().commitTransaction();
+        projection_parts[projection.name].emplace_back(std::move(tmp_part->part));
+    }
+    else
+    {
+        projection_squashes[projection_idx].setHeader(block_to_squash.cloneEmpty());
+        projection_squashes[projection_idx].add({block_to_squash.getColumns(), block_to_squash.rows()});
+        Chunk squashed_chunk = Squashing::squash(
+            projection_squashes[projection_idx].generate(),
+            projection_squashes[projection_idx].getHeader());
+
+        if (squashed_chunk)
+            writeTempProjectionPart(projection_idx, std::move(squashed_chunk));
+    }
 }
 
 void PartMergerWriter::writeTempProjectionPart(size_t projection_idx, Chunk chunk)
@@ -1988,7 +2001,7 @@ private:
 
         if (ctx->metadata_snapshot->hasPrimaryKey() || ctx->metadata_snapshot->hasSecondaryIndices())
         {
-            auto indices_expression_dag = ctx->data->getPrimaryKeyAndSkipIndicesExpression(ctx->metadata_snapshot, skip_indices)->getActionsDAG().clone();
+            auto indices_expression_dag = ctx->data->getPrimaryKeyAndIndicesExpression(ctx->metadata_snapshot, skip_indices, {})->getActionsDAG().clone();
             auto extracting_subcolumns_dag = createSubcolumnsExtractionActions(builder->getHeader(), indices_expression_dag.getRequiredColumnsNames(), ctx->context);
             if (!extracting_subcolumns_dag.getNodes().empty())
                 indices_expression_dag = ActionsDAG::merge(std::move(extracting_subcolumns_dag), std::move(indices_expression_dag));

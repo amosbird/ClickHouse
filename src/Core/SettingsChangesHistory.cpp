@@ -41,6 +41,8 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
         /// Note: please check if the key already exists to prevent duplicate entries.
         addSettingsChanges(settings_changes_history, "26.4",
         {
+            {"text_index_posting_list_apply_mode", "materialize", "materialize", "New setting to control how posting lists are applied during projection text index queries"},
+            {"text_index_density_threshold", 0.5, 0.5, "New setting for adaptive algorithm selection threshold in lazy posting list mode"},
             {"optimize_truncate_order_by_after_group_by_keys", false, true, "Remove trailing ORDER BY elements once all GROUP BY keys are covered in the ORDER BY prefix."},
             {"use_statistics_for_part_pruning", false, true, "New setting to use statistics for part pruning during query execution."},
             {"distributed_index_analysis_only_on_coordinator", false, false, "New setting."},
@@ -171,6 +173,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"query_plan_read_in_order_through_join", false, true, "New setting"},
             {"query_plan_max_limit_for_lazy_materialization", 10, 10000, "Increase the limit after performance improvement"},
             {"text_index_hint_max_selectivity", 0.2, 0.2, "New setting"},
+
             {"allow_experimental_time_time64_type", false, true, "Enable Time and Time64 type by default"},
             {"enable_time_time64_type", false, true, "Enable Time and Time64 type by default"},
             {"use_skip_indexes_for_top_k", false, false, "New setting."},
@@ -1140,6 +1143,7 @@ const VersionToSettingsChangesMap & getMergeTreeSettingsChangesHistory()
             {"auto_statistics_types", "", "minmax, uniq", "Enable auto statistics by default"},
             {"shared_merge_tree_replica_set_max_lifetime_seconds", 300, 300, "New setting"},
             {"shared_merge_tree_enable_automatic_empty_partitions_cleanup", false, true, "Enable by default"},
+            {"compress_per_column_in_compact_parts", true, true, "New setting"},
         });
         addSettingsChanges(merge_tree_settings_changes_history, "26.1",
         {

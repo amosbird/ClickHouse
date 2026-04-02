@@ -1236,22 +1236,34 @@ void MergeTask::ExecuteAndFinalizeHorizontalPart::calculateProjectionForBlock(
     if (block_to_squash.rows() == 0)
         return;
 
-    auto & projection_squash_plan = ctx->projection_squashes[projection_idx];
-    projection_squash_plan.setHeader(block_to_squash.cloneEmpty());
-    projection_squash_plan.add({block_to_squash.getColumns(), block_to_squash.rows()});
-    Chunk squashed_chunk = Squashing::squash(
-        projection_squash_plan.generate(),
-        projection_squash_plan.getHeader());
-
-    if (squashed_chunk)
+    if (projection.index)
     {
-        auto result = projection_squash_plan.getHeader()->cloneWithColumns(squashed_chunk.detachColumns());
         auto tmp_part = MergeTreeDataWriter::writeTempProjectionPart(
-            *global_ctx->data, ctx->log, result, projection, global_ctx->new_data_part.get(), ++ctx->projection_block_num);
+            *global_ctx->data, ctx->log, block_to_squash, projection, global_ctx->new_data_part.get(), ++ctx->projection_block_num);
 
         tmp_part->finalize();
         tmp_part->part->getDataPartStorage().commitTransaction();
         ctx->projection_parts[projection.name].emplace_back(std::move(tmp_part->part));
+    }
+    else
+    {
+        auto & projection_squash_plan = ctx->projection_squashes[projection_idx];
+        projection_squash_plan.setHeader(block_to_squash.cloneEmpty());
+        projection_squash_plan.add({block_to_squash.getColumns(), block_to_squash.rows()});
+        Chunk squashed_chunk = Squashing::squash(
+            projection_squash_plan.generate(),
+            projection_squash_plan.getHeader());
+
+        if (squashed_chunk)
+        {
+            auto result = projection_squash_plan.getHeader()->cloneWithColumns(squashed_chunk.detachColumns());
+            auto tmp_part = MergeTreeDataWriter::writeTempProjectionPart(
+                *global_ctx->data, ctx->log, result, projection, global_ctx->new_data_part.get(), ++ctx->projection_block_num);
+
+            tmp_part->finalize();
+            tmp_part->part->getDataPartStorage().commitTransaction();
+            ctx->projection_parts[projection.name].emplace_back(std::move(tmp_part->part));
+        }
     }
 }
 
@@ -2776,13 +2788,13 @@ void MergeTask::ExecuteAndFinalizeHorizontalPart::createMergedStream() const
                 chassert(global_ctx->merged_part_offsets == nullptr);
                 chassert(std::find(merging_column_names.begin(), merging_column_names.end(), "_part_index") == merging_column_names.end());
                 global_ctx->merged_part_offsets
-                    = std::make_shared<MergedPartOffsets>(global_ctx->future_part->parts.size(), MergedPartOffsets::MappingMode::Enabled);
+                    = std::make_shared<MergedPartOffsets>(global_ctx->future_part->parts, MergedPartOffsets::MappingMode::Enabled);
                 merging_column_names.push_back("_part_index");
             }
             else
             {
                 global_ctx->merged_part_offsets
-                    = std::make_shared<MergedPartOffsets>(global_ctx->future_part->parts.size(), MergedPartOffsets::MappingMode::Disabled);
+                    = std::make_shared<MergedPartOffsets>(global_ctx->future_part->parts, MergedPartOffsets::MappingMode::Disabled);
             }
             break;
         }
@@ -2792,7 +2804,7 @@ void MergeTask::ExecuteAndFinalizeHorizontalPart::createMergedStream() const
         && !global_ctx->text_indexes_to_merge.empty()
         && (!global_ctx->merged_part_offsets || !global_ctx->merged_part_offsets->isMappingEnabled()))
     {
-        global_ctx->merged_part_offsets = std::make_shared<MergedPartOffsets>(global_ctx->future_part->parts.size(), MergedPartOffsets::MappingMode::Enabled);
+        global_ctx->merged_part_offsets = std::make_shared<MergedPartOffsets>(global_ctx->future_part->parts, MergedPartOffsets::MappingMode::Enabled);
         merging_column_names.push_back("_part_index");
     }
 

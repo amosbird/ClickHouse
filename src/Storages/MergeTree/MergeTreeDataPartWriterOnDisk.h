@@ -37,6 +37,43 @@ struct Granule
 /// Multiple granules to write for concrete block.
 using Granules = std::vector<Granule>;
 
+/// Data-only writer stream for large posting lists (no marks file).
+struct LargePostingListWriterStream
+{
+    LargePostingListWriterStream(
+        const String & escaped_column_name_,
+        const MutableDataPartStoragePtr & data_part_storage,
+        const String & data_path_,
+        const std::string & data_file_extension_,
+        size_t max_compress_block_size_,
+        const WriteSettings & query_write_settings);
+
+    ~LargePostingListWriterStream()
+    {
+        plain_file.reset();
+    }
+
+    void preFinalize();
+    void finalize();
+    void cancel() noexcept;
+    void sync() const;
+    void addToChecksums(MergeTreeDataPartChecksums & checksums);
+
+    String escaped_column_name;
+    std::string data_file_extension;
+
+    /// compressed_hashing -> compressor -> plain_hashing -> plain_file
+    std::unique_ptr<WriteBufferFromFileBase> plain_file;
+    HashingWriteBuffer plain_hashing;
+
+    bool is_prefinalized = false;
+
+    alignas(16) UInt32 doc_buffer[128];
+    alignas(16) uint8_t packed_buffer[128 * 4];
+};
+
+using LargePostingListWriterStreamPtr = std::unique_ptr<LargePostingListWriterStream>;
+
 /// Writes data part to disk in different formats.
 /// Calculates and serializes primary and skip indices if needed.
 class MergeTreeDataPartWriterOnDisk : public IMergeTreeDataPartWriter
@@ -85,6 +122,9 @@ protected:
     void fillSkipIndicesChecksums(MergeTreeDataPartChecksums & checksums);
     void finishSkipIndicesSerialization(bool sync);
 
+    void fillLargePostingChecksums(MergeTreeDataPartChecksums & checksums);
+    void finishLargePostingSerialization(bool sync);
+
     /// Get global number of the current which we are writing (or going to start to write)
     size_t getCurrentMark() const { return current_mark; }
 
@@ -109,6 +149,9 @@ protected:
     virtual ISerialization::SerializeBinaryBulkSettings getSerializationSettings() const = 0;
 
     const MergeTreeIndices skip_indices;
+
+    std::unordered_map<String, LargePostingListWriterStreamPtr> large_posting_streams;
+
     const String marks_file_extension;
     const CompressionCodecPtr default_codec;
 

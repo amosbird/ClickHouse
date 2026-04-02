@@ -1,0 +1,59 @@
+#pragma once
+
+#include <Storages/MergeTree/MergeTreeIndexText.h>
+#include <Storages/MergeTree/IMergeTreeDataPart.h>
+
+namespace DB
+{
+
+struct ProjectionDescription;
+
+struct MergeTreeIndexGranuleProjection final : public MergeTreeIndexGranuleText
+{
+    explicit MergeTreeIndexGranuleProjection(const String & projection_name_);
+    ~MergeTreeIndexGranuleProjection() override;
+
+    void deserializeBinaryWithMultipleStreams(MergeTreeIndexInputStreams & streams, MergeTreeIndexDeserializationState & state) override;
+
+    static PostingListPtr
+    materializeFromTokenInfo(LargePostingListReaderStream & stream, const TokenPostingsInfo & token_info, size_t block_idx);
+
+    String projection_name;
+
+    /// Whether the posting list blocks include an index section, extracted from part metadata during deserialization.
+    /// Default is `true` because projection text indexes are always created with block-index support.
+    /// The value is confirmed from part metadata when dictionary blocks are read (cache-miss path),
+    /// but on cache-hit the default must be correct so the lazy apply-mode is used.
+    bool has_block_index = true;
+
+    /// TODO(amos): Do we need per-token stream to reduce seek?
+    LargePostingListReaderStreamPtr large_posting_stream;
+
+    /// The projection part that stores the `.lpst` file.
+    /// Saved during deserialization so that `MergeTreeReaderProjectionIndex`
+    /// can create independent posting streams from the correct storage.
+    MergeTreeDataPartPtr projection_part;
+};
+
+class MergeTreeIndexProjection final : public IMergeTreeIndex
+{
+public:
+    explicit MergeTreeIndexProjection(const ProjectionDescription & projection, std::shared_ptr<const MergeTreeIndexText> text_index_);
+
+    ~MergeTreeIndexProjection() override = default;
+
+    bool isTextIndex() const override { return true; }
+    bool isProjectionIndex() const override { return true; }
+
+    MergeTreeIndexSubstreams getSubstreams() const override;
+    MergeTreeIndexFormat
+    getDeserializedFormat(const MergeTreeDataPartChecksums & checksums, const std::string & path_prefix) const override;
+
+    MergeTreeIndexGranulePtr createIndexGranule() const override;
+    MergeTreeIndexAggregatorPtr createIndexAggregator() const override;
+    MergeTreeIndexConditionPtr createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context) const override;
+
+    std::shared_ptr<const MergeTreeIndexText> text_index;
+};
+
+}

@@ -2,7 +2,6 @@
 
 #include <Access/AccessControl.h>
 #include <Columns/ColumnConst.h>
-#include <Common/iota.h>
 #include <Core/Defines.h>
 #include <Core/Settings.h>
 #include <DataTypes/DataTypesNumber.h>
@@ -23,8 +22,8 @@
 #include <Parsers/ASTProjectionDeclaration.h>
 #include <Parsers/ASTProjectionSelectQuery.h>
 #include <Parsers/ASTSetQuery.h>
-#include <Parsers/parseQuery.h>
 #include <Parsers/ParserCreateQuery.h>
+#include <Parsers/parseQuery.h>
 #include <Processors/Executors/CompletedPipelineExecutor.h>
 #include <Processors/Executors/PullingPipelineExecutor.h>
 #include <Processors/ISink.h>
@@ -39,6 +38,7 @@
 #include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/MergeTree/MergeTreeVirtualColumns.h>
 #include <Storages/StorageInMemoryMetadata.h>
+#include <Common/iota.h>
 
 namespace DB
 {
@@ -67,7 +67,6 @@ namespace MergeTreeSetting
 extern const MergeTreeSettingsUInt64 index_granularity_bytes;
 
 }
-
 
 bool ProjectionDescription::isPrimaryKeyColumnPossiblyWrappedInFunctions(const ASTPtr & node) const
 {
@@ -267,17 +266,15 @@ ProjectionDescription ProjectionDescription::getProjectionFromAST(
         merge_tree_settings->applyChanges(projection_definition->with_settings->changes);
     result.settings_changes = merge_tree_settings->changes();
 
-    /// Always track whether the user overrode index_granularity or index_granularity_bytes,
+    /// Track whether the effective settings include index_granularity or index_granularity_bytes overrides
+    /// (from either the projection index's getDefaultSettings() or the user's explicit SETTINGS clause),
     /// so that checkProperties can reject projections with granularity overrides on non-adaptive tables.
-    if (projection_definition->with_settings)
+    for (const auto & change : result.settings_changes)
     {
-        for (const auto & change : projection_definition->with_settings->changes)
+        if (change.name == "index_granularity" || change.name == "index_granularity_bytes")
         {
-            if (change.name == "index_granularity" || change.name == "index_granularity_bytes")
-            {
-                result.has_index_granularity_overrides = true;
-                break;
-            }
+            result.has_index_granularity_overrides = true;
+            break;
         }
     }
 
@@ -296,6 +293,7 @@ ProjectionDescription ProjectionDescription::getProjectionFromAST(
             "serialization_info_version",
             "nullable_serialization_version",
             "string_serialization_version",
+            "compress_per_column_in_compact_parts",
             "replace_long_file_name_to_hash",
             "map_serialization_version",
             "map_serialization_version_for_zero_level_parts",
