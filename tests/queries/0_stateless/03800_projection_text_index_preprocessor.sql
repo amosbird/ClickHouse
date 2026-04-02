@@ -336,5 +336,117 @@ CREATE TABLE tab
 )
 ENGINE = MergeTree ORDER BY tuple();   -- { serverError INCORRECT_QUERY }
 
+SELECT '- The preprocessor expression must be a function, not an identifier';
+CREATE TABLE tab
+(
+    key UInt64,
+    val String,
+    PROJECTION idx INDEX val TYPE text(tokenizer = 'splitByNonAlpha', preprocessor = val) -- val is a column
+)
+ENGINE = MergeTree ORDER BY tuple();   -- { serverError INCORRECT_QUERY }
+
+SELECT '- The preprocessor expression must not contain arrayJoin';
+CREATE TABLE tab
+(
+    key UInt64,
+    val String,
+    PROJECTION idx INDEX val TYPE text(tokenizer = 'splitByNonAlpha', preprocessor = arrayJoin(array(val)))
+)
+ENGINE = MergeTree ORDER BY tuple();   -- { serverError INCORRECT_QUERY }
+
+SELECT 'Maps preprocessor support';
+SELECT '- Index on mapKeys(val)';
+
+CREATE TABLE tab
+(
+    key UInt64,
+    val Map(String, String),
+    PROJECTION idx INDEX mapKeys(val) TYPE text(tokenizer = 'splitByNonAlpha', preprocessor = lower(mapKeys(val)))
+)
+ENGINE = MergeTree ORDER BY key;
+
+INSERT INTO tab VALUES (1, {'foo': 'foo'}), (2, {'BAR': 'BAR'}), (3, {'Baz': 'Baz'});
+
+SELECT '-- Map itself should not be passed as argument';
+SELECT count() FROM tab WHERE hasAllTokens(val, 'foo');  -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
+
+SELECT '-- SELECT on mapKeys(val)';
+SELECT 'foo', key FROM tab WHERE hasAllTokens(mapKeys(val), 'foo');
+SELECT 'FOO', key FROM tab WHERE hasAllTokens(mapKeys(val), 'FOO');
+SELECT 'BAR', key FROM tab WHERE hasAllTokens(mapKeys(val), 'BAR');
+SELECT 'Baz', key FROM tab WHERE hasAllTokens(mapKeys(val), 'Baz');
+
+SELECT 'foo', key FROM tab WHERE hasAnyTokens(mapKeys(val), 'foo');
+SELECT 'FOO', key FROM tab WHERE hasAnyTokens(mapKeys(val), 'FOO');
+SELECT 'BAR', key FROM tab WHERE hasAnyTokens(mapKeys(val), 'BAR');
+SELECT 'Baz', key FROM tab WHERE hasAnyTokens(mapKeys(val), 'Baz');
+
+SELECT '-- SELECT on mapValues(val) (fallback)';
+SELECT 'foo', key FROM tab WHERE hasAllTokens(mapValues(val), 'foo');
+SELECT 'FOO', key FROM tab WHERE hasAllTokens(mapValues(val), 'FOO');
+SELECT 'BAR', key FROM tab WHERE hasAllTokens(mapValues(val), 'BAR');
+SELECT 'Baz', key FROM tab WHERE hasAllTokens(mapValues(val), 'Baz');
+
+SELECT 'foo', key FROM tab WHERE hasAnyTokens(mapValues(val), 'foo');
+SELECT 'FOO', key FROM tab WHERE hasAnyTokens(mapValues(val), 'FOO');
+SELECT 'BAR', key FROM tab WHERE hasAnyTokens(mapValues(val), 'BAR');
+SELECT 'Baz', key FROM tab WHERE hasAnyTokens(mapValues(val), 'Baz');
+
+
+DROP TABLE tab;
+
+SELECT '- Index on mapValues(val)';
+CREATE TABLE tab
+(
+    key UInt64,
+    val Map(String, String),
+    PROJECTION idx INDEX mapValues(val) TYPE text(tokenizer = 'splitByNonAlpha', preprocessor = lower(mapValues(val)))
+)
+ENGINE = MergeTree ORDER BY key;
+
+INSERT INTO tab VALUES (1, {'foo': 'foo'}), (2, {'BAR': 'BAR'}), (3, {'Baz': 'Baz'});
+
+SELECT '-- SELECT on mapValues(val)';
+SELECT 'foo', key FROM tab WHERE hasAllTokens(mapValues(val), 'foo');
+SELECT 'FOO', key FROM tab WHERE hasAllTokens(mapValues(val), 'FOO');
+SELECT 'BAR', key FROM tab WHERE hasAllTokens(mapValues(val), 'BAR');
+SELECT 'Baz', key FROM tab WHERE hasAllTokens(mapValues(val), 'Baz');
+
+SELECT 'foo', key FROM tab WHERE hasAnyTokens(mapValues(val), 'foo');
+SELECT 'FOO', key FROM tab WHERE hasAnyTokens(mapValues(val), 'FOO');
+SELECT 'BAR', key FROM tab WHERE hasAnyTokens(mapValues(val), 'BAR');
+SELECT 'Baz', key FROM tab WHERE hasAnyTokens(mapValues(val), 'Baz');
+
+SELECT '-- SELECT on mapKeys(val) (fallback)';
+SELECT 'foo', key FROM tab WHERE hasAllTokens(mapKeys(val), 'foo');
+SELECT 'FOO', key FROM tab WHERE hasAllTokens(mapKeys(val), 'FOO');
+SELECT 'BAR', key FROM tab WHERE hasAllTokens(mapKeys(val), 'BAR');
+SELECT 'Baz', key FROM tab WHERE hasAllTokens(mapKeys(val), 'Baz');
+
+SELECT 'foo', key FROM tab WHERE hasAnyTokens(mapKeys(val), 'foo');
+SELECT 'FOO', key FROM tab WHERE hasAnyTokens(mapKeys(val), 'FOO');
+SELECT 'BAR', key FROM tab WHERE hasAnyTokens(mapKeys(val), 'BAR');
+SELECT 'Baz', key FROM tab WHERE hasAnyTokens(mapKeys(val), 'Baz');
+
+DROP TABLE tab;
+
+SELECT '- Negative tests';
+SELECT '-- Index on whole map must fail';
+CREATE TABLE tab
+(
+    key UInt64,
+    val Map(String, String),
+    PROJECTION idx INDEX val TYPE text(tokenizer = 'splitByNonAlpha', preprocessor = lower(mapKeys(val)))
+)
+ENGINE = MergeTree ORDER BY key;   -- { serverError BAD_ARGUMENTS }
+
+SELECT '-- The preprocessor expression must contain the index definition';
+CREATE TABLE tab
+(
+    key UInt64,
+    val Map(String, String),
+    PROJECTION idx INDEX mapKeys(val) TYPE text(tokenizer = 'splitByNonAlpha', preprocessor = lower(val))
+)
+ENGINE = MergeTree ORDER BY key;   -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
 
 DROP TABLE IF EXISTS tab;

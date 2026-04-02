@@ -1,4 +1,4 @@
--- Tags: long, zookeeper, no-random-merge-tree-settings, no-replicated-database
+-- Tags: long, zookeeper, no-replicated-database
 -- { echo ON }
 
 SET enable_full_text_index = 1;

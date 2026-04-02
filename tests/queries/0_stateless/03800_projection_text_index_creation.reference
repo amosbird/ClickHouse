@@ -41,3 +41,7 @@ Must be created on String, FixedString, LowCardinality(String), LowCardinality(F
 1
 1
 1
+Test unicodeWord tokenizer.
+Test posting_list_codec argument.
+-- posting_list_codec must be a string.
+-- posting_list_codec must be none or bitpacking.

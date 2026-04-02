@@ -740,3 +740,95 @@ SELECT count() FROM tab WHERE has(mapValues(map), 'foo') SETTINGS force_data_ski
 SELECT count() FROM tab WHERE has(mapValues(map_fixed), toFixedString('foo', 3)) SETTINGS force_data_skipping_indices='idx_values_fixed';
 
 DROP TABLE tab;
+
+SELECT 'Test unicodeWord tokenizer.';
+
+CREATE TABLE tab
+(
+    str String,
+    PROJECTION idx INDEX str TYPE text(tokenizer = unicodeWord)
+)
+ENGINE = MergeTree
+ORDER BY tuple();
+DROP TABLE tab;
+
+CREATE TABLE tab
+(
+    str String,
+    PROJECTION idx INDEX str TYPE text(tokenizer = unicodeWord())
+)
+ENGINE = MergeTree
+ORDER BY tuple();
+DROP TABLE tab;
+
+SELECT 'Test posting_list_codec argument.';
+
+SELECT '-- posting_list_codec must be a string.';
+
+CREATE TABLE tab
+(
+    str String,
+    PROJECTION idx INDEX str TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 1024)
+)
+ENGINE = MergeTree
+ORDER BY tuple(); -- { serverError BAD_ARGUMENTS }
+
+CREATE TABLE tab
+(
+    str String,
+    PROJECTION idx INDEX str TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 1.0)
+)
+ENGINE = MergeTree
+ORDER BY tuple(); -- { serverError BAD_ARGUMENTS }
+
+CREATE TABLE tab
+(
+    str String,
+    PROJECTION idx INDEX str TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'none')
+)
+ENGINE = MergeTree
+ORDER BY tuple();
+
+DROP TABLE tab;
+
+SELECT '-- posting_list_codec must be none or bitpacking.';
+
+CREATE TABLE tab
+(
+    str String,
+    PROJECTION idx INDEX str TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'none')
+)
+ENGINE = MergeTree
+ORDER BY tuple();
+
+DROP TABLE tab;
+
+CREATE TABLE tab
+(
+    str String,
+    PROJECTION idx INDEX str TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'bitpacking')
+)
+ENGINE = MergeTree
+ORDER BY tuple();
+
+DROP TABLE tab;
+
+CREATE TABLE tab
+(
+    str String,
+    PROJECTION idx INDEX str TYPE text(tokenizer = 'splitByNonAlpha', posting_list_codec = 'invalid_codec')
+)
+ENGINE = MergeTree
+ORDER BY tuple(); -- { serverError BAD_ARGUMENTS }
+
+CREATE TABLE tab (
+    id UInt32,
+    n Nullable(Int32),
+    PROJECTION idx INDEX n TYPE text(tokenizer = 'splitByNonAlpha'))
+ENGINE = MergeTree ORDER BY id; -- { serverError BAD_ARGUMENTS }
+
+CREATE TABLE tab (
+    id UInt32,
+    arr Array(Nullable(Int32)),
+    PROJECTION idx INDEX arr TYPE text(tokenizer = 'splitByNonAlpha'))
+ENGINE = MergeTree ORDER BY id; -- { serverError BAD_ARGUMENTS }

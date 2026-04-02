@@ -99,3 +99,44 @@ Negative tests on preprocessor construction validations.
 - The preprocessor must have input and output values of the same type (here: String)
 - The preprocessor expression must use the column identifier
 - The preprocessor expression must use only deterministic functions
+- The preprocessor expression must be a function, not an identifier
+- The preprocessor expression must not contain arrayJoin
+Maps preprocessor support
+- Index on mapKeys(val)
+-- Map itself should not be passed as argument
+-- SELECT on mapKeys(val)
+foo	1
+FOO	1
+BAR	2
+Baz	3
+foo	1
+FOO	1
+BAR	2
+Baz	3
+-- SELECT on mapValues(val) (fallback)
+foo	1
+BAR	2
+Baz	3
+foo	1
+BAR	2
+Baz	3
+- Index on mapValues(val)
+-- SELECT on mapValues(val)
+foo	1
+FOO	1
+BAR	2
+Baz	3
+foo	1
+FOO	1
+BAR	2
+Baz	3
+-- SELECT on mapKeys(val) (fallback)
+foo	1
+BAR	2
+Baz	3
+foo	1
+BAR	2
+Baz	3
+- Negative tests
+-- Index on whole map must fail
+-- The preprocessor expression must contain the index definition
