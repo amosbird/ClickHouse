@@ -1,0 +1,61 @@
+<test>
+    <!-- OpenTelemetry-style traces table: 4 String ORDER BY columns with
+         bloom_filter skip indices for point lookups, plus a minmax index
+         on timestamp for range scans. Without the permuted columns cache,
+         each ORDER BY column with a skip index is permuted twice (primary
+         key + skip index). With the cache, only once. -->
+
+    <create_query>
+        CREATE TABLE permute_cache_wide
+        (
+            service String,
+            trace_id String,
+            span_id String,
+            timestamp DateTime64(6),
+            parent_span_id String,
+            operation String,
+            duration_us UInt64,
+            status_code UInt8,
+            INDEX idx_service (service) TYPE bloom_filter,
+            INDEX idx_trace (trace_id) TYPE bloom_filter,
+            INDEX idx_span (span_id) TYPE bloom_filter,
+            INDEX idx_ts (timestamp) TYPE minmax
+        )
+        ENGINE = MergeTree
+        ORDER BY (service, trace_id, span_id, timestamp)
+        SETTINGS min_rows_for_wide_part = 0, min_bytes_for_wide_part = 0
+    </create_query>
+
+    <create_query>
+        CREATE TABLE permute_cache_src
+        (
+            service String,
+            trace_id String,
+            span_id String,
+            timestamp DateTime64(6),
+            parent_span_id String,
+            operation String,
+            duration_us UInt64,
+            status_code UInt8
+        )
+        ENGINE = Memory
+    </create_query>
+
+    <fill_query>
+        INSERT INTO permute_cache_src SELECT
+            hex(sipHash128(number, 0)),
+            hex(sipHash128(number, 1)),
+            hex(sipHash128(number, 2)),
+            toDateTime64('2024-01-01', 6) + number / 1000000,
+            hex(sipHash128(number, 3)),
+            randomPrintableASCII(32),
+            rand64() % 10000000,
+            rand() % 3
+        FROM numbers(5000000)
+    </fill_query>
+
+    <query>INSERT INTO permute_cache_wide SELECT * FROM permute_cache_src</query>
+
+    <drop_query>DROP TABLE IF EXISTS permute_cache_wide</drop_query>
+    <drop_query>DROP TABLE IF EXISTS permute_cache_src</drop_query>
+</test>
