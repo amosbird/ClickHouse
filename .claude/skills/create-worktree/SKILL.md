@@ -16,32 +16,28 @@ Create a new git worktree for ClickHouse development with submodules hardlinked 
 
 ## Important
 
-Always create worktrees in `/data2/worktrees/<name>` and symlink from the main repo root: `ln -s /data2/worktrees/<name> <name>`. Do not create worktrees directly inside the main repo directory.
+Create worktrees directly inside the main repo directory. No symlinks needed.
 
 ## Usage
 
 Run `create-worktree.sh` from the repo root:
 
 ```bash
-./create-worktree.sh <branch-name> /data2/worktrees/<branch-name> [--ref <base-ref>]
-ln -s /data2/worktrees/<branch-name> <branch-name>
+./create-worktree.sh <branch-name> <branch-name> [--ref <base-ref>]
 ```
 
 ### Arguments
 
 - `branch-name` — Branch to check out (creates if doesn't exist)
-- `worktree-path` — Where to put the worktree (must be `/data2/worktrees/<name>`)
+- `worktree-path` — Where to put the worktree (directly in the repo root)
 - `--ref REF` — Base ref for new branches (default: `upstream/master`)
 
 ### Examples
 
 ```bash
-./create-worktree.sh my-feature /data2/worktrees/my-feature     # new branch from upstream/master
-ln -s /data2/worktrees/my-feature my-feature
-./create-worktree.sh fix/issue-123 /data2/worktrees/fix-issue-123  # creates worktree + symlink
-ln -s /data2/worktrees/fix-issue-123 fix-issue-123
-./create-worktree.sh backport /data2/worktrees/backport --ref release/25.6  # base on release branch
-ln -s /data2/worktrees/backport backport
+./create-worktree.sh my-feature my-feature                        # new branch from upstream/master
+./create-worktree.sh fix/issue-123 fix-issue-123                  # creates worktree in repo root
+./create-worktree.sh backport backport --ref release/25.6         # base on release branch
 ```
 
 ## What the script does

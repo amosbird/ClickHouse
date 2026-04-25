@@ -16,7 +16,17 @@ cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 
 export LIBHDFS3_CONF=etc/hdfs-client.xml
 
-clickhouse_server="build/programs/clickhouse server"
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/resolve-clickhouse.sh"
+
+if [[ -n "$1" && "$1" != -* ]]; then
+    resolve_clickhouse_binary "$1" || exit 1
+    save_active_worktree "$CLICKHOUSE_ROOT"
+    shift
+else
+    resolve_clickhouse_binary || exit 1
+fi
+clickhouse_server="$CLICKHOUSE_BINARY server"
+trap 'rm -f "$_active_worktree_file"' EXIT
 # clickhouse_server="./clickhouse-base server"
 # clickhouse_server="./clickhouse-opt server"
 # clickhouse_server="./clickhouse-opt-query-cache server"

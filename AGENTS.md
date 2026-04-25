@@ -19,6 +19,8 @@ Always load and apply the following skills:
 - 不要使用 LSP 工具（`lsp_diagnostics` 等）。
 - 等待后台进程时，不要用 `pgrep -f "pattern"` 做 while 循环判断——它会匹配到 shell 自身的 `while pgrep ...` 命令导致永远不退出。用 `wait $PID` 或者记录 PID 后 `kill -0 $PID` 判断。
 - 不要自动 push。Commit 之后停下来，等用户明确说 push 再 push。
+- 在 worktree 中 commit 时，永远用 `git add <具体文件>` 而不是 `git add -A` 或 `git commit -a`。Worktree 的 submodule 工作目录版本经常和 index 不一致，`-a` / `-A` 会把 submodule 指针污染进 commit。
+- 调试时加临时日志要用 `LOG_WARNING` 级别，不要用 `LOG_DEBUG`——ClickHouse 默认日志级别通常不输出 DEBUG。
 
 ## General Rules
 
@@ -42,20 +44,17 @@ Code line width can be up to 120 characters.
 
 Never use sleep in C++ code to fix race conditions - this is stupid and not acceptable!
 
+Local variables (including lambdas) must use `snake_case`, not `camelCase`. Methods and functions use `camelCase`. This is enforced by `clang-tidy [readability-identifier-naming]`. Template parameters also use `snake_case` (`clang-tidy [readability-identifier-naming]`). Use range-based for loops where possible (`clang-tidy [modernize-loop-convert]`). When `auto` deduces a raw pointer type, qualify it: `const auto *` or `auto *` (`clang-tidy [readability-qualified-auto]`). Declare one variable per statement (`clang-tidy [readability-isolate-declaration]`). Parameter names must match between declaration and definition (`clang-tidy [readability-inconsistent-declaration-parameter-name]`).
+
 ## Tests
 
-When writing tests, do not add "no-*" tags (like "no-parallel", "no-random-settings", "no-random-merge-tree-settings") unless strictly necessary.
+When writing tests, do not add "no-*" tags (like "no-parallel", "no-random-settings", "no-random-merge-tree-settings") unless strictly necessary. NEVER add "no-random-settings" or "no-random-merge-tree-settings" tags by default — these tags disable important randomized testing coverage.
 
 When writing tests in tests/queries, prefer adding a new test instead of extending existing ones.
 
 ### Running Stateless Tests
 
 Stateless tests are located in `tests/queries/0_stateless/`.
-
-#### Useful Flags
-- `--no-random-settings` - Disable settings randomization (useful for deterministic debugging)
-- `--no-random-merge-tree-settings` - Disable MergeTree settings randomization
-- `--record` - Automatically update `.reference` files when stdout differs
 
 #### Test File Extensions
 - `.sql` - SQL test (most common)
@@ -122,6 +121,7 @@ Do not read or modify AI agent configuration files (AGENTS.md, .claude/, .openco
 When working in a worktree:
 - When searching code (grep, glob, reading files), always search inside the current worktree directory first, not the main repo. The worktree may have different code from the main repo.
 - Create worktrees in `/data2/worktrees/<name>` and symlink from the main repo root: `ln -s /data2/worktrees/<name> <name>`. All existing worktrees follow this pattern — do not create worktrees directly inside the main repo directory.
+- After rebasing or merging upstream changes, always run `git submodule update --init` in the worktree to sync submodules. Upstream frequently updates submodules (llvm, boost, jemalloc, thrift, etc.), and stale submodules cause cmake or link errors.
 - Build with `./build.sh <worktree-name>` from the main repo root, not by finding build directories inside the worktree. For specific targets: `./build.sh <worktree-name> --target <target>`.
 - The gtest binary is at `<worktree>/build/src/unit_tests_dbms`, not `<worktree>/build/unit_tests_dbms`.
 - Run Praktika tests from the worktree root with `workdir` set to the worktree, not from the main repo root.

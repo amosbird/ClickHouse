@@ -45,10 +45,10 @@ the code.
 ### Step 2: Setup (create-worktree skill)
 
 ```bash
-./create-worktree.sh <branch-name>
+./create-worktree.sh <branch-name> <branch-name>
 ```
 
-- Creates the worktree on `/data2/worktrees/<branch-name>/` with a symlink from `<repo-root>/<branch-name>/`
+- Creates the worktree directly in `<repo-root>/<branch-name>/`
 - Sets up all 129 submodules via hardlinks (~20 seconds)
 
 ## Step 3: Implement

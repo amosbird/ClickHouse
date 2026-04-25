@@ -26,7 +26,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
-IMAGE="clickhouse/binary-builder:0261cd99929ade4b3e59_amd"
+IMAGE="clickhouse/binary-builder:b30242e6c10cfd50044d_amd"
 
 # --- Parse arguments ---
 WORKTREE_PATH=""

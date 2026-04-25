@@ -11,7 +11,9 @@ done
 
 export LD_BIND_NOW=1
 base=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-clickhouse="$base"/build/programs/clickhouse
+source "$base/resolve-clickhouse.sh"
+resolve_clickhouse_binary || exit 1
+clickhouse="$CLICKHOUSE_BINARY"
 # clickhouse=/tmp/gentoo/usr/local/bin/clickhouse
 case "$(basename "$0")" in
     cq)
