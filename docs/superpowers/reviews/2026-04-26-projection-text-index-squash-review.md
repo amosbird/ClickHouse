@@ -2686,7 +2686,7 @@
 tests	46495	4015	50510
 src	36352	13932	50284
 docs	5917	2073	7990
-ci	4719	1364	6083
+ci	4723	1368	6091
 contrib	4155	163	4318
 programs	1601	511	2112
 .github	1028	412	1440
@@ -2697,14 +2697,25 @@ cmake	96	33	129
 docker	19	19	38
 CMakeLists.txt	12	11	23
 .gitmodules	6	6	12
-{tests	4	4	8
 .gitignore	5	0	5
 CHANGELOG.md	1	1	2
 ```
 
 ### Test/build signal
+- UTC timestamp: `2026-04-26T06:37:27Z`
 - Command: `./build.sh projection-index-text-squash --target clickhouse --no-cmake`
-- Result: success (`exit code 0`), `ninja: no work to do.`, binary confirmed at `projection-index-text-squash/build/programs/clickhouse`.
+- Exit code: `0`
+- Tail snippet:
+```text
+sys	0m0.609s
+Local storage:
+  Cache size (GB): 21.7 / 50.0 (43.31%)
+--- Build complete ---
+-rwxr-xr-x 1 clickhouse clickhouse 4.3G Apr 26 07:01 /ClickHouse/build/programs/clickhouse
+
+=== Done ===
+Binary: /tmp/gentoo/home/amos/git/ClickHouse/projection-index-text-squash/build/programs/clickhouse
+```
 
 ## Stage B Findings (prioritized)
 
