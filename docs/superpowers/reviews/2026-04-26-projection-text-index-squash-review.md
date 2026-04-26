@@ -2,6 +2,8 @@
 
 ## Scope
 - Branch diff base: `dfccde97dd659ab73d962fcd7d5e9a88cc587690`
+- Stage B analysis base source: `projection-index-text-squash/tmp/review/base_commit.txt` (reflog-derived branch base)
+- Stage B review range base is from `base_commit.txt`; controller checkpoint SHAs were not used to define the range
 - Branch changed files: `2667`
 - Uncommitted changed files: `0`
 
@@ -2719,14 +2721,25 @@ Binary: /tmp/gentoo/home/amos/git/ClickHouse/projection-index-text-squash/build/
 
 ## Stage B Findings (prioritized)
 
+### Analysis base for Stage B pass 1
+- Stage B pass 1 used `projection-index-text-squash/tmp/review/base_commit.txt` (`dfccde97dd659ab73d962fcd7d5e9a88cc587690`) as the analysis base.
+- Controller checkpoint SHAs are orchestration metadata only and were not used for Stage B review-range selection.
+
 ### Branch diff findings
 ### [high] `hasPhrase` direct-read path throws for non-projection text indexes
 - Confidence: medium
-- Location: `src/Storages/MergeTree/MergeTreeReaderTextIndex.cpp:748`
+- Location: `src/Storages/MergeTree/MergeTreeReaderTextIndex.cpp:756-758`
 - Why it matters: `hasPhrase` queries on regular `TYPE text` indexes can raise an exception in the direct-read path instead of returning rows, breaking correctness for indexed phrase search.
-- Evidence: `MergeTreeIndexConditionText` builds `TextSearchMode::Phrase` for `hasPhrase` (`src/Storages/MergeTree/MergeTreeIndexConditionText.cpp:802`) and can select direct-read mode when phrase support is enabled (`src/Storages/MergeTree/MergeTreeIndexConditionText.cpp:229`). But `MergeTreeReaderTextIndex::fillColumn` handles only `Any`/`All` and throws `Invalid search mode` for other modes (`src/Storages/MergeTree/MergeTreeReaderTextIndex.cpp:756`). Non-projection `hasPhrase` text-index tests exist (`tests/queries/0_stateless/02346_text_index_function_hasPhrase.sql:13`), so this path is reachable.
+- Evidence: `MergeTreeIndexConditionText` builds `TextSearchMode::Phrase` for `hasPhrase` (`src/Storages/MergeTree/MergeTreeIndexConditionText.cpp:802`) and can select direct-read mode when phrase support is enabled (`src/Storages/MergeTree/MergeTreeIndexConditionText.cpp:229`). But `MergeTreeReaderTextIndex::fillColumn` handles only `Any`/`All` and throws `Invalid search mode` for other modes (`src/Storages/MergeTree/MergeTreeReaderTextIndex.cpp:758`). Non-projection `hasPhrase` text-index tests exist (`tests/queries/0_stateless/02346_text_index_function_hasPhrase.sql:13`), so this path is reachable.
 - Suggested fix: Add a `TextSearchMode::Phrase` branch in `MergeTreeReaderTextIndex::fillColumn` (at least equivalent postings handling to `All` for non-projection readers), or explicitly prevent `hasPhrase` from using this direct-read path for non-projection text indexes.
 
 ## Coverage note
-- Reviewed scopes:
+- Stage B pass 1 reviewed hotspot areas:
+  - `src/Storages/MergeTree` text-index runtime and projection paths (`MergeTreeIndexConditionText`, `MergeTreeReaderTextIndex`, `ProjectionIndex/*`, `StorageMergeTreeTextIndex`).
+  - `src/Processors/QueryPlan/Optimizations/optimizeDirectReadFromTextIndex.cpp` and `src/Functions/hasPhrase.cpp` / `src/Functions/hasAnyAllTokens.cpp` for direct-read and search-mode flow.
+  - Text-index-heavy stateless suites in `tests/queries/0_stateless/02346_text_index_*`, `tests/queries/0_stateless/0380*_projection_text_index_*`, and `tests/queries/0_stateless/0409*_text_index_*`.
+- No-issue rationale for major areas examined:
+  - In the text-index runtime path, search-mode/data-flow checks were coherent except for the `TextSearchMode::Phrase` fallthrough to `Invalid search mode` at `MergeTreeReaderTextIndex.cpp:758`.
+  - Large `tests` / `docs` / `ci` churn was triaged as lower relevance to this runtime exception path; sampled hotspot entries did not alter the direct-read phrase execution path.
 - Low-confidence or blocked scopes:
+  - None in Stage B pass 1 for text-index direct-read correctness scope.
