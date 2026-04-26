@@ -4,6 +4,7 @@
 - Branch diff base: `dfccde97dd659ab73d962fcd7d5e9a88cc587690`
 - Stage B analysis base source: `projection-index-text-squash/tmp/review/base_commit.txt` (reflog-derived branch base)
 - Stage B review range base is from `base_commit.txt`; controller checkpoint SHAs were not used to define the range
+- Path context: unless explicitly prefixed otherwise, all finding paths (for example, `src/...` and `tests/...`) are relative to the `projection-index-text-squash` worktree root.
 - Branch changed files: `2667`
 - Uncommitted changed files: `0`
 
@@ -2724,6 +2725,10 @@ Binary: /tmp/gentoo/home/amos/git/ClickHouse/projection-index-text-squash/build/
 ### Analysis base for Stage B pass 1
 - Stage B pass 1 used `projection-index-text-squash/tmp/review/base_commit.txt` (`dfccde97dd659ab73d962fcd7d5e9a88cc587690`) as the analysis base.
 - Controller checkpoint SHAs are orchestration metadata only and were not used for Stage B review-range selection.
+- Stage B pass 1 is hotspot-sampling for correctness triage, not an exhaustive full-file deep review of all `2667` changed files.
+- Coverage metrics from artifacts: `branch_changed_files.txt` = `2667` files, `high_risk_branch_files.txt` = `1357` queued high-risk files, `changed_stateless_tests.txt` = `562` changed stateless tests.
+- Targeted subset selection rule for deep review: prioritize files in `src/Storages/MergeTree`, `src/Processors/QueryPlan/Optimizations/optimizeDirectReadFromTextIndex.cpp`, `src/Functions/hasPhrase.cpp`, `src/Functions/hasAnyAllTokens.cpp`, plus stateless text-index patterns `tests/queries/0_stateless/02346_text_index_*`, `tests/queries/0_stateless/0380*_projection_text_index_*`, and `tests/queries/0_stateless/0409*_text_index_*`.
+- Targeted subset count from `branch_changed_files.txt` under this rule: `217` files.
 
 ### Branch diff findings
 ### [high] `hasPhrase` direct-read path throws for non-projection text indexes
@@ -2737,13 +2742,15 @@ Binary: /tmp/gentoo/home/amos/git/ClickHouse/projection-index-text-squash/build/
 ### [low] Uncommitted delta scope is empty
 - Confidence: high
 - Location: `projection-index-text-squash/tmp/review/uncommitted_changed_files.txt`
+- Scope semantics: this uncommitted manifest currently covers staged/unstaged tracked paths from `git diff --name-only`.
+- Untracked visibility: `git status --porcelain` currently reports `7` untracked (`??`) entries in the `projection-index-text-squash` worktree; these are visible but outside the tracked-diff manifest scope.
 - Why it matters: there is no staged or unstaged file-level delta to analyze beyond the branch-owned review scope.
 - Evidence: `projection-index-text-squash/tmp/review/uncommitted_changed_files.txt` contains `0` files and `projection-index-text-squash/tmp/review/uncommitted_diffs/` contains no per-file diff exports.
 - Suggested fix: no correctness action is required for uncommitted changes in this pass.
 
 ### Final prioritized list
 1. [high] `hasPhrase` direct-read path throws for non-projection text indexes (`src/Storages/MergeTree/MergeTreeReaderTextIndex.cpp:756-758`).
-2. Uncommitted delta scope is empty (`0` files), so no additional findings were added from staged/unstaged changes.
+2. [low] Uncommitted delta scope is empty (`0` tracked files from `git diff --name-only`), so no additional findings were added from staged/unstaged tracked changes; `git status --porcelain` currently reports `7` untracked entries outside this scope.
 
 ## Coverage note
 - Reviewed scopes:
