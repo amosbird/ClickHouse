@@ -2719,6 +2719,14 @@ Binary: /tmp/gentoo/home/amos/git/ClickHouse/projection-index-text-squash/build/
 
 ## Stage B Findings (prioritized)
 
+### Branch diff findings
+### [high] `hasPhrase` direct-read path throws for non-projection text indexes
+- Confidence: medium
+- Location: `src/Storages/MergeTree/MergeTreeReaderTextIndex.cpp:748`
+- Why it matters: `hasPhrase` queries on regular `TYPE text` indexes can raise an exception in the direct-read path instead of returning rows, breaking correctness for indexed phrase search.
+- Evidence: `MergeTreeIndexConditionText` builds `TextSearchMode::Phrase` for `hasPhrase` (`src/Storages/MergeTree/MergeTreeIndexConditionText.cpp:802`) and can select direct-read mode when phrase support is enabled (`src/Storages/MergeTree/MergeTreeIndexConditionText.cpp:229`). But `MergeTreeReaderTextIndex::fillColumn` handles only `Any`/`All` and throws `Invalid search mode` for other modes (`src/Storages/MergeTree/MergeTreeReaderTextIndex.cpp:756`). Non-projection `hasPhrase` text-index tests exist (`tests/queries/0_stateless/02346_text_index_function_hasPhrase.sql:13`), so this path is reachable.
+- Suggested fix: Add a `TextSearchMode::Phrase` branch in `MergeTreeReaderTextIndex::fillColumn` (at least equivalent postings handling to `All` for non-projection readers), or explicitly prevent `hasPhrase` from using this direct-read path for non-projection text indexes.
+
 ## Coverage note
 - Reviewed scopes:
 - Low-confidence or blocked scopes:
