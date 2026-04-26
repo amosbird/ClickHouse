@@ -2703,7 +2703,8 @@ CHANGELOG.md	1	1	2
 ```
 
 ### Test/build signal
-- Captured from Task 2 Step 4 command output in terminal history.
+- Command: `./build.sh projection-index-text-squash --target clickhouse --no-cmake`
+- Result: success (`exit code 0`), `ninja: no work to do.`, binary confirmed at `projection-index-text-squash/build/programs/clickhouse`.
 
 ## Stage B Findings (prioritized)
 
