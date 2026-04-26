@@ -2734,7 +2734,7 @@ Binary: /tmp/gentoo/home/amos/git/ClickHouse/projection-index-text-squash/build/
 - Suggested fix: Add a `TextSearchMode::Phrase` branch in `MergeTreeReaderTextIndex::fillColumn` (at least equivalent postings handling to `All` for non-projection readers), or explicitly prevent `hasPhrase` from using this direct-read path for non-projection text indexes.
 
 ### Uncommitted diff findings
-### Uncommitted delta scope is empty
+### [low] Uncommitted delta scope is empty
 - Confidence: high
 - Location: `projection-index-text-squash/tmp/review/uncommitted_changed_files.txt`
 - Why it matters: there is no staged or unstaged file-level delta to analyze beyond the branch-owned review scope.
