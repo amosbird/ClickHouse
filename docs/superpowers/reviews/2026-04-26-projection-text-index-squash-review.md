@@ -2733,13 +2733,23 @@ Binary: /tmp/gentoo/home/amos/git/ClickHouse/projection-index-text-squash/build/
 - Evidence: `MergeTreeIndexConditionText` builds `TextSearchMode::Phrase` for `hasPhrase` (`src/Storages/MergeTree/MergeTreeIndexConditionText.cpp:802`) and can select direct-read mode when phrase support is enabled (`src/Storages/MergeTree/MergeTreeIndexConditionText.cpp:229`). But `MergeTreeReaderTextIndex::fillColumn` handles only `Any`/`All` and throws `Invalid search mode` for other modes (`src/Storages/MergeTree/MergeTreeReaderTextIndex.cpp:758`). Non-projection `hasPhrase` text-index tests exist (`tests/queries/0_stateless/02346_text_index_function_hasPhrase.sql:13`), so this path is reachable.
 - Suggested fix: Add a `TextSearchMode::Phrase` branch in `MergeTreeReaderTextIndex::fillColumn` (at least equivalent postings handling to `All` for non-projection readers), or explicitly prevent `hasPhrase` from using this direct-read path for non-projection text indexes.
 
+### Uncommitted diff findings
+### Uncommitted delta scope is empty
+- Confidence: high
+- Location: `projection-index-text-squash/tmp/review/uncommitted_changed_files.txt`
+- Why it matters: there is no staged or unstaged file-level delta to analyze beyond the branch-owned review scope.
+- Evidence: `projection-index-text-squash/tmp/review/uncommitted_changed_files.txt` contains `0` files and `projection-index-text-squash/tmp/review/uncommitted_diffs/` contains no per-file diff exports.
+- Suggested fix: no correctness action is required for uncommitted changes in this pass.
+
+### Final prioritized list
+1. [high] `hasPhrase` direct-read path throws for non-projection text indexes (`src/Storages/MergeTree/MergeTreeReaderTextIndex.cpp:756-758`).
+2. Uncommitted delta scope is empty (`0` files), so no additional findings were added from staged/unstaged changes.
+
 ## Coverage note
-- Stage B pass 1 reviewed hotspot areas:
-  - `src/Storages/MergeTree` text-index runtime and projection paths (`MergeTreeIndexConditionText`, `MergeTreeReaderTextIndex`, `ProjectionIndex/*`, `StorageMergeTreeTextIndex`).
-  - `src/Processors/QueryPlan/Optimizations/optimizeDirectReadFromTextIndex.cpp` and `src/Functions/hasPhrase.cpp` / `src/Functions/hasAnyAllTokens.cpp` for direct-read and search-mode flow.
+- Reviewed scopes:
+  - Stage B pass 1 hotspot paths in `src/Storages/MergeTree`, `src/Processors/QueryPlan/Optimizations/optimizeDirectReadFromTextIndex.cpp`, and text-index function paths (`src/Functions/hasPhrase.cpp`, `src/Functions/hasAnyAllTokens.cpp`).
   - Text-index-heavy stateless suites in `tests/queries/0_stateless/02346_text_index_*`, `tests/queries/0_stateless/0380*_projection_text_index_*`, and `tests/queries/0_stateless/0409*_text_index_*`.
-- No-issue rationale for major areas examined:
-  - In the text-index runtime path, search-mode/data-flow checks were coherent except for the `TextSearchMode::Phrase` fallthrough to `Invalid search mode` at `MergeTreeReaderTextIndex.cpp:758`.
-  - Large `tests` / `docs` / `ci` churn was triaged as lower relevance to this runtime exception path; sampled hotspot entries did not alter the direct-read phrase execution path.
+  - Uncommitted delta scope from `projection-index-text-squash/tmp/review/uncommitted_changed_files.txt` and exported artifacts in `projection-index-text-squash/tmp/review/uncommitted_diffs/`.
 - Low-confidence or blocked scopes:
-  - None in Stage B pass 1 for text-index direct-read correctness scope.
+  - The branch finding remains `medium` confidence because this task executed code/diff review only and did not run a focused runtime repro for the `hasPhrase` direct-read path.
+  - No blocked uncommitted scopes: manifest is empty, so there is no additional staged/unstaged correctness surface to review.
