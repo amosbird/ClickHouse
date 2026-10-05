@@ -1,6 +1,4 @@
 -- Tags: long, no-object-storage
--- Disable force_primary_key_reverse_order: SHOW CREATE TABLE output checks ORDER BY clause
-SET force_primary_key_reverse_order = 0;
 
 drop table if exists tp_1;
 drop table if exists tp_2;

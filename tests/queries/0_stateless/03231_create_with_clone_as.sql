@@ -1,7 +1,4 @@
 -- Tags: no-replicated-database, memory-engine
--- Disable force_primary_key_reverse_order: SHOW CREATE output contains ORDER BY which changes with forced DESC
-SET force_primary_key_reverse_order = 0;
-
 -- Tag no-replicated-database: Unsupported type of CREATE TABLE ... CLONE AS ... query
 
 DROP TABLE IF EXISTS foo_memory;

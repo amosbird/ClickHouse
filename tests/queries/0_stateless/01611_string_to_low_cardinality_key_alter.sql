@@ -1,6 +1,3 @@
--- Disable force_primary_key_reverse_order: SHOW CREATE output contains ORDER BY which changes with forced DESC
-SET force_primary_key_reverse_order = 0;
-
 DROP TABLE IF EXISTS table_with_lc_key;
 
 CREATE TABLE table_with_lc_key

@@ -3166,6 +3166,11 @@ class TestCase:
         if allow_random_settings:
             base_settings = SettingsRandomizer.get_random_settings(args, self.tags)
             self.apply_random_settings_limits(base_settings)
+            # `force_primary_key_reverse_order` changes the table definition (and the
+            # physical order of data) like a MergeTree setting does, so it is randomized
+            # only when MergeTree settings are.
+            if not allow_random_mt_settings:
+                base_settings.pop("force_primary_key_reverse_order", None)
 
         base_mt_settings = {}
         if allow_random_mt_settings:

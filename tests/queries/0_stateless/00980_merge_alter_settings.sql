@@ -1,7 +1,4 @@
 -- Tags: no-replicated-database, log-engine
--- Disable force_primary_key_reverse_order: SHOW CREATE output contains ORDER BY which changes with forced DESC
-SET force_primary_key_reverse_order = 0;
-
 -- Tag no-replicated-database: Unsupported type of ALTER query
 
 DROP TABLE IF EXISTS log_for_alter;

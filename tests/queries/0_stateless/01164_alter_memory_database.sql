@@ -1,7 +1,4 @@
 -- Tags: zookeeper, no-parallel, no-shared-merge-tree, no-flaky-check
--- Disable force_primary_key_reverse_order: SHOW CREATE output contains ORDER BY which changes with forced DESC
-SET force_primary_key_reverse_order = 0;
-
 -- no-shared-merge-tree: doesn't support databases without UUID
 
 drop database if exists test_1164_memory;

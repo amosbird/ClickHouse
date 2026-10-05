@@ -1,6 +1,4 @@
 -- Tags: long, zookeeper
--- Disable force_primary_key_reverse_order: SHOW CREATE TABLE output checks ORDER BY clause
-SET force_primary_key_reverse_order = 0;
 
 DROP TABLE IF EXISTS table_rename_with_default;
 
