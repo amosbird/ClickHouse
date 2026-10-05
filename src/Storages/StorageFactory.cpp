@@ -1,6 +1,7 @@
 #include <Storages/StorageFactory.h>
 #include <DataTypes/DataTypeCustom.h>
 #include <DataTypes/IDataType.h>
+#include <DataTypes/TypeTree.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DDLTask.h>
 #include <Parsers/ASTFunction.h>
@@ -46,13 +47,6 @@ namespace
     /// `projection_index_context` that is unavailable on the user-facing column read/write
     /// paths. Reject it deterministically at DDL time instead of letting the column be
     /// created and fail later at INSERT or SELECT.
-    ///
-    /// Note: `IDataType::forEachChild` already walks the type tree recursively (e.g.
-    /// `DataTypeMap::forEachChild` calls `callback(key); callback(value); key->forEachChild;
-    /// value->forEachChild;`), so the callback below must NOT recurse — doing so would
-    /// double-visit every node and blow up exponentially on deeply nested types like
-    /// `Map(Map(Map(...))` (which is exactly what 03299_deep_nested_map_creation exercises
-    /// with 100 levels).
     void checkNoPostingListInType(const IDataType & type, const String & column_name)
     {
         auto throw_if_posting_list = [&](const IDataType & t)
@@ -64,8 +58,7 @@ namespace
                     column_name);
         };
 
-        throw_if_posting_list(type);
-        type.forEachChild(throw_if_posting_list);
+        forEachInTypeTree(type, throw_if_posting_list);
     }
 }
 

@@ -115,6 +115,8 @@ public:
 
     size_t getPartStartingOffset() const override { return part_starting_offset; }
 
+    UUID getTableUUID() const override { return data_part->storage.getStorageID().uuid; }
+
     MergeTreeSettingsPtr getStorageSettings() const override { return data_part->storage.getSettings(); }
 
     std::shared_ptr<const IMergeTreeDataPart> getDataPart() const override { return data_part; }

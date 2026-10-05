@@ -239,6 +239,7 @@ void MergeTreeProjectionIndexGranuleText::deserializeBinaryWithMultipleStreams(
         MarkRanges{MarkRange(marks_to_read.front().first, marks_to_read.back().first + 1)},
         /*virtual_fields=*/{},
         /*uncompressed_cache=*/{},
+        /*columns_cache=*/ nullptr,
         projection_part->storage.getContext()->getMarkCache().get(),
         nullptr,
         reader_settings,
@@ -323,8 +324,10 @@ void MergeTreeProjectionIndexGranuleText::deserializeBinaryWithMultipleStreams(
         reader->matched_row_indices_for_posting.reset();
         MutableColumns result;
         result.resize(cols.size());
+        /// The columns cache is not used for projection parts, so the range end is not needed.
         size_t rows_read = reader->readRows(
             mark,
+            /*current_range_last_mark=*/ 0,
             prev_mark && *prev_mark == mark - 1,
             rows_to_read,
             result);
