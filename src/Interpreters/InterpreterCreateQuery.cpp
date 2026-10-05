@@ -871,7 +871,16 @@ void forceReverse(ASTPtr & node)
 
 void applyForceReverseOrder(ASTStorage * storage)
 {
-    if (!storage || !storage->order_by)
+    if (!storage)
+        return;
+
+    /// `MergeTree` treats `PRIMARY KEY` without `ORDER BY` as the sorting key. Materialize it as `ORDER BY`,
+    /// so that such tables get a reversed sorting key too. `PRIMARY KEY` stays as is, because it inherits
+    /// the directions from the sorting key.
+    if (!storage->order_by && storage->primary_key && storage->engine && storage->engine->name.ends_with("MergeTree"))
+        storage->set(storage->order_by, storage->primary_key->clone());
+
+    if (!storage->order_by)
         return;
 
     if (auto * func = storage->order_by->as<ASTFunction>(); func && func->name == "tuple" && func->arguments)
