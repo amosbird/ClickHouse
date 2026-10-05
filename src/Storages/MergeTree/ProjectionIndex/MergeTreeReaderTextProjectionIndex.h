@@ -23,6 +23,9 @@ public:
         size_t max_rows_to_read,
         MutableColumns & res_columns) override;
 
+    /// Unlike the base class, `readRows` here walks whole marks: a read cannot start or stop inside a mark.
+    bool canReadIncompleteGranules() const override { return false; }
+
     void setPrecomputedGranule(const IndexGranulesMap & granules) override;
     void setIndexGranule(MergeTreeIndexGranulePtr index_granule) override;
 
